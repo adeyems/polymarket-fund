@@ -91,6 +91,14 @@ ws://localhost:8002/api/v1/ws/stream
 | `action` | string | `"TRADE_PLACED"`, `"SKIPPED_FILTER"`, etc. |
 | `bids` | array | Top 3 bid levels |
 | `asks` | array | Top 3 ask levels |
+| `virtual_pnl` | float | Session PnL (Trading Profit - Fees - Gas) |
+| `session_volume` | float | Total trading volume in session |
+| `total_equity` | float | Current total equity (cash + positions) |
+| `buying_power` | float | Available cash for trading |
+| `total_gas_spent_usd` | float | **NEW** Total gas spent in USD |
+| `total_trades_count` | int | **NEW** Number of filled trades |
+| `total_order_updates` | int | **NEW** Number of order updates (reposts) |
+| `current_matic_balance` | float | **NEW** Current MATIC/POL balance for gas |
 
 ---
 

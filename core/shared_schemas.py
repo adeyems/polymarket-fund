@@ -25,6 +25,12 @@ class TradeData(BaseModel):
     session_volume: float = 0.0
     total_equity: float = 0.0
     buying_power: float = 0.0
+    
+    # Efficiency Metrics (New for UI Recommendations)
+    total_gas_spent_usd: float = 0.0
+    total_trades_count: int = 0
+    total_order_updates: int = 0
+    current_matic_balance: float = 0.0
 
 class BotParams(BaseModel):
     """

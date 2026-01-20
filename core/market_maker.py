@@ -148,6 +148,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     total_gas_spent = 0.0
     total_fees_paid = 0.0
     total_trades_count = 0
+    total_order_updates = 0
     
     theoretical_position = 0.0
     session_volume = 0.0
@@ -324,8 +325,14 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                                 virtual_pnl=round(virtual_pnl, 2),
                                 session_volume=round(session_volume, 2),
                                 total_equity=round(total_equity, 2),
-                                buying_power=round(current_cash, 2)
+                                buying_power=round(current_cash, 2),
+                                # Efficiency Metrics (New)
+                                total_gas_spent_usd=round(total_gas_spent * matic_price, 4),
+                                total_trades_count=total_trades_count,
+                                total_order_updates=total_order_updates,
+                                current_matic_balance=round(current_matic, 4)
                             )
+                            total_order_updates += 1
                             queue.put_nowait(trade_data.dict())
                             print(f"[{datetime.now().strftime('%H:%M:%S')}] [PnL] Session: ${virtual_pnl:.2f} | Pos: {theoretical_position} | Equity: ${total_equity:.2f}")
                             
