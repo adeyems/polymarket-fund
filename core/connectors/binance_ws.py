@@ -14,7 +14,7 @@ class BinanceWSManager:
     def __init__(self, symbols: list):
         self.symbols = [s.lower() for s in symbols]
         self.prices: Dict[str, float] = {}
-        self.url = "wss://stream.binance.us:9443/ws"
+        self.url = "wss://stream.binance.com:9443/ws"
         self._is_running = False
         self._task: Optional[asyncio.Task] = None
 

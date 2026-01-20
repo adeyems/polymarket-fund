@@ -59,13 +59,30 @@ def get_usdc_balance(address, collateral_address):
     return 1000.0
 
 def fetch_target_markets():
-    """Mock/Fetch markets from Gamma API."""
-    return [{
-        "question": "Will Bitcoin reach $100k in 2026?",
-        "enableOrderBook": True,
-        "clobTokenIds": json.dumps(["101676997363687199724245607342877036148401850938023978421879460310389391082353"]),
-        "liquidity": 1000000
-    }]
+    """Fetch top liquid Bitcoin market from Gamma API directly."""
+    try:
+        # Search for high-volume active Bitcoin markets
+        url = f"{GAMMA_API_URL}?limit=50&active=true&closed=false&order=volume&descending=true&tag_slug=bitcoin"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        markets = resp.json()
+        
+        valid_markets = []
+        for m in markets:
+            # Must have Order Book enabled and be a "Binary" market (usually implied by clobTokenIds len=2)
+            if m.get('enableOrderBook') and m.get('clobTokenIds'):
+                valid_markets.append(m)
+        
+        if valid_markets:
+            top_market = valid_markets[0]
+            print(f"[MARKET-DISCOVERY] Found Liquid Market: {top_market.get('question')} (Vol: ${top_market.get('volumeNum'):.0f})")
+            return [top_market]
+        
+        print("[MARKET-DISCOVERY] No liquid CLOB markets found via API. Falling back to hardcoded 2024...")
+        return []
+    except Exception as e:
+        print(f"[MARKET-DISCOVERY] API Error: {e}")
+        return []
 
 def parse_strike_price(question):
     """Extracts dollar amount from question."""
