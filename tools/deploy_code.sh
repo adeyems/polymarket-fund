@@ -13,8 +13,8 @@ APP_DIR="/app/hft"
 echo "🚀 Starting Deployment to $REMOTE_IP..."
 
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ec2-user@"$REMOTE_IP" "
-    echo '--- Pulling Latest Code ---'
-    cd $APP_DIR && git pull origin main
+    echo '--- Pulling Latest Code (Force Sync) ---'
+    cd $APP_DIR && git fetch origin main && git reset --hard origin/main
     
     echo '--- Installing Dependencies ---'
     $APP_DIR/venv/bin/pip install -r $APP_DIR/requirements.txt
