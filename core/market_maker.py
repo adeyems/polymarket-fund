@@ -100,28 +100,42 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
         return
 
     # 2. Session Initialization
-    print(f"[BOT] Starting Production-Grade Trading Bot (MOCK_TRADING={MOCK_TRADING})")
+    print(f"[BOT] Starting 72-Hour Reliability Burn-In (MOCK_TRADING={MOCK_TRADING})")
     
-    # Fetch real baseline from chain (even if mocking, we want to see the starting wallet state)
+    # 2.1 Error Logging Setup
+    import logging
+    error_logger = logging.getLogger("hft_errors")
+    err_handler = logging.FileHandler("/var/log/quesquant/errors.log")
+    err_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s'))
+    error_logger.addHandler(err_handler)
+    error_logger.setLevel(logging.ERROR)
+
+    # Fetch real baseline or use soak test defaults
     from web3 import Web3
     from eth_account import Account
     rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
     USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
     ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},{"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}]
 
-    start_usdc = 1000.0
-    start_matic = 0.0
-    try:
-        w3 = Web3(Web3.HTTPProvider(rpc))
-        address = Account.from_key(pk).address
-        start_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
-        
-        usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
-        raw_balance = usdc_contract.functions.balanceOf(address).call()
-        decimals = usdc_contract.functions.decimals().call()
-        start_usdc = raw_balance / (10 ** decimals)
-    except Exception as e:
-        print(f"[ERROR] Balance Fetch Failed: {e}")
+    if MOCK_TRADING:
+        start_usdc = 100.00  # Soak Test Baseline
+        start_matic = 94.00  # Soak Test Baseline
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SOAK_CONFIG] Using Mock Starting Balances: ${start_usdc} USDC, {start_matic} POL")
+    else:
+        start_usdc = 1000.0
+        start_matic = 0.0
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc))
+            address = Account.from_key(pk).address
+            start_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
+            
+            usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
+            raw_balance = usdc_contract.functions.balanceOf(address).call()
+            decimals = usdc_contract.functions.decimals().call()
+            start_usdc = raw_balance / (10 ** decimals)
+        except Exception as e:
+            error_logger.error(f"Balance Fetch Failed: {e}")
+            print(f"[ERROR] Balance Fetch Failed: {e}")
         
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] USDC: {start_usdc:.2f}")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] MATIC: {start_matic:.4f}")
@@ -134,12 +148,19 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     pending_fills = []
     BLOCK_TIME = 4.0 
     price_history = {} 
+
     last_midpoint = None
     last_check_time = time.time()
 
     # --- MAIN ENGINE LOOP ---
     try:
         while True:
+            try:
+                # 0. Kill Switch Check
+                if not bot_state.is_running:
+                    print("[BOT] Bot Paused. Waiting for activation...")
+                    await asyncio.sleep(5)
+                    continue
             # Heartbeat (CloudWatch)
             metrics.push_heartbeat()
             
@@ -297,7 +318,9 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                     break # Single market per tick for latency optimization
 
             except Exception as loop_e:
+                error_logger.exception("Critical Loop Error")
                 print(f"[LOOP ERROR] {loop_e}")
+                await asyncio.sleep(5)
 
             # CPU Yield
             await asyncio.sleep(max(0, 1 - (time.time() - loop_start)))
