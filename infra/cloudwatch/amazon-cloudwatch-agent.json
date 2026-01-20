@@ -1,0 +1,94 @@
+{
+    "agent": {
+        "metrics_collection_interval": 60,
+        "run_as_user": "root",
+        "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+    },
+    "logs": {
+        "logs_collected": {
+            "files": {
+                "collect_list": [
+                    {
+                        "file_path": "/var/log/hft_bot.log",
+                        "log_group_name": "/quesquant/hft-bot",
+                        "log_stream_name": "{instance_id}/hft-bot",
+                        "retention_in_days": 30,
+                        "timezone": "UTC",
+                        "multi_line_start_pattern": "{timestamp_format}"
+                    },
+                    {
+                        "file_path": "/var/log/hft_bot_error.log",
+                        "log_group_name": "/quesquant/hft-bot",
+                        "log_stream_name": "{instance_id}/hft-bot-errors",
+                        "retention_in_days": 90,
+                        "timezone": "UTC"
+                    },
+                    {
+                        "file_path": "/opt/quesquant/simulation_trades.csv",
+                        "log_group_name": "/quesquant/trades",
+                        "log_stream_name": "{instance_id}/trades",
+                        "retention_in_days": 365,
+                        "timezone": "UTC"
+                    }
+                ]
+            }
+        },
+        "log_stream_name": "default",
+        "force_flush_interval": 15
+    },
+    "metrics": {
+        "namespace": "QuesQuant/System",
+        "metrics_collected": {
+            "cpu": {
+                "measurement": [
+                    "cpu_usage_idle",
+                    "cpu_usage_user",
+                    "cpu_usage_system"
+                ],
+                "metrics_collection_interval": 60,
+                "totalcpu": true,
+                "resources": [
+                    "*"
+                ]
+            },
+            "mem": {
+                "measurement": [
+                    "mem_used_percent",
+                    "mem_available_percent"
+                ],
+                "metrics_collection_interval": 60
+            },
+            "disk": {
+                "measurement": [
+                    "disk_used_percent",
+                    "disk_free"
+                ],
+                "metrics_collection_interval": 300,
+                "resources": [
+                    "/"
+                ]
+            },
+            "net": {
+                "measurement": [
+                    "net_bytes_recv",
+                    "net_bytes_sent",
+                    "net_packets_recv",
+                    "net_packets_sent"
+                ],
+                "metrics_collection_interval": 60,
+                "resources": [
+                    "eth0"
+                ]
+            }
+        },
+        "append_dimensions": {
+            "InstanceId": "${aws:InstanceId}",
+            "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+        },
+        "aggregation_dimensions": [
+            [
+                "InstanceId"
+            ]
+        ]
+    }
+}
