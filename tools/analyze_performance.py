@@ -17,8 +17,11 @@ def get_live_stats():
     """Fetch live USDC and MATIC balance from Polygon."""
     load_dotenv(ENV_FILE)
     pk = os.getenv("POLYMARKET_PRIVATE_KEY")
-    rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
-    if not pk: return 0.0, 0.0
+    # Try multiple RPCs to avoid rate limits
+    rpcs = [os.getenv("POLYGON_RPC"), "https://polygon-rpc.com", "https://rpc-mainnet.maticvigil.com"]
+    rpcs = [r for r in rpcs if r]
+    
+    if not pk: return 0.0, 0.0, "UNKNOWN"
     
     USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" # USDC.e
     ERC20_ABI = [
@@ -26,25 +29,27 @@ def get_live_stats():
         {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
     ]
 
-    try:
-        from web3 import Web3
-        w3 = Web3(Web3.HTTPProvider(rpc))
-        from eth_account import Account
-        address = Account.from_key(pk).address
-        
-        # Matic Balance
-        current_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
-        
-        # USDC Balance
-        usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
-        raw_balance = usdc_contract.functions.balanceOf(address).call()
-        decimals = usdc_contract.functions.decimals().call()
-        current_usdc = raw_balance / (10 ** decimals)
-        
-        return current_usdc, current_matic
-    except Exception as e:
-        print(f"Error fetching live blockchain stats: {e}")
-        return 0.0, 0.0
+    from web3 import Web3
+    from eth_account import Account
+    address = Account.from_key(pk).address
+
+    for rpc in rpcs:
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc))
+            # Matic Balance
+            current_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
+            
+            # USDC Balance
+            usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
+            raw_balance = usdc_contract.functions.balanceOf(address).call()
+            decimals = usdc_contract.functions.decimals().call()
+            current_usdc = raw_balance / (10 ** decimals)
+            
+            return current_usdc, current_matic, address
+        except Exception as e:
+            continue
+            
+    return 0.0, 0.0, address
 
 def analyze():
     if not os.path.exists(LOG_FILE):
@@ -203,7 +208,7 @@ def analyze():
     print("="*50 + "\n")
 
     # Discrepancy Report
-    current_usdc, current_matic = get_live_stats()
+    current_usdc, current_matic, address = get_live_stats()
     usdc_delta = current_usdc - start_usdc
     gas_spent = start_matic - current_matic
     true_alpha = usdc_delta - (gas_spent * matic_price)
@@ -213,6 +218,7 @@ def analyze():
     print("="*50)
     print(" QUESQUANT HFT - BLOCKCHAIN DISCREPANCY REPORT ")
     print("="*50)
+    print(f" {'Wallet Address':<25} | {address} ")
     print(f" {'Metric':<25} | {'Value':<15} ")
     print("-" * 50)
     print(f" {'Initial USDC (Logs)':<25} | ${start_usdc:>14.2f} ")
