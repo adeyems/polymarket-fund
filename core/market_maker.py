@@ -41,7 +41,7 @@ def get_usdc_balance(address, collateral_address):
 def fetch_target_markets():
     """Mock/Fetch markets from Gamma API."""
     return [{
-        "question": "Will Trump deport less than 250,000?",
+        "question": "Will Bitcoin reach $100k in 2026?",
         "enableOrderBook": True,
         "clobTokenIds": json.dumps(["101676997363687199724245607342877036148401850938023978421879460310389391082353"]),
         "liquidity": 1000000
