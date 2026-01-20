@@ -72,7 +72,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     metrics = get_metrics_exporter()
     metrics.start()
     
-    binance = get_binance_manager(["btcusdt", "ethusdt", "solusdt"])
+    binance = get_binance_manager(["btcusdt", "ethusdt", "solusdt", "maticusdt"])
     binance.start()
     
     # 1. Setup Client
@@ -100,7 +100,30 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
         return
 
     # 2. Session Initialization
-    initial_cash = 1000.0
+    print(f"[BOT] Starting Production-Grade Trading Bot (MOCK_TRADING={MOCK_TRADING})")
+    
+    # Fetch real baseline from chain (even if mocking, we want to see the starting wallet state)
+    try:
+        usdc_resp = await asyncio.to_thread(client.get_collateral_balance)
+        start_usdc = float(usdc_resp.get('balance', 0))
+    except:
+        start_usdc = 1000.0
+        
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] USDC: {start_usdc:.2f}")
+    
+    # 2.1 Fetch Matic Balance for Gas Tracking
+    start_matic = 0.0
+    from web3 import Web3
+    rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc))
+        start_matic = float(w3.from_wei(w3.eth.get_balance(creds_obj.address if hasattr(creds_obj, 'address') else client.get_address()), 'ether'))
+    except Exception as e:
+        print(f"[ERROR] Matic Balance Fetch Failed: {e}")
+        
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] MATIC: {start_matic:.4f}")
+    
+    initial_cash = start_usdc
     current_cash = initial_cash
     theoretical_position = 0.0
     session_volume = 0.0
@@ -179,7 +202,10 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                     best_ask = float(order_book.asks[0].price)
                     midpoint = (best_bid + best_ask) / 2
                     
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [LATENCY] {latency_ms:.1f}ms | Mid: {midpoint:.3f} | Liq: ${liquidity/1e6:.1f}M")
+                    # 2.5 Matic Price for Gas Correction
+                    matic_price = binance.prices.get('maticusdt', 0.85) # Default to 0.85 if missing
+                    
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [LATENCY] {latency_ms:.1f}ms | Mid: {midpoint:.3f} | Matic: ${matic_price:.3f} | Liq: ${liquidity/1e6:.1f}M")
 
                     # 3. Spread & Volatility Management
                     vol_state = "LOW_VOL"

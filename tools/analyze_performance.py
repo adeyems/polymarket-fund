@@ -2,10 +2,43 @@
 import re
 import sys
 import os
+import json
 from datetime import datetime
 from collections import deque
+from py_clob_client.client import ClobClient
+from py_clob_client.constants import POLYGON
+from py_clob_client.clob_types import ApiCreds
+from dotenv import load_dotenv
 
 LOG_FILE = "/var/log/quesquant/hft_bot.log"
+ENV_FILE = "/app/hft/.env"
+
+def get_live_stats():
+    """Fetch live USDC and MATIC balance from Polygon."""
+    load_dotenv(ENV_FILE)
+    pk = os.getenv("POLYMARKET_PRIVATE_KEY")
+    rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
+    creds = ApiCreds(
+        api_key=os.getenv("CLOB_API_KEY"),
+        api_secret=os.getenv("CLOB_SECRET"),
+        api_passphrase=os.getenv("CLOB_PASSPHRASE")
+    )
+    if not pk: return 0.0, 0.0
+    try:
+        from web3 import Web3
+        client = ClobClient("https://clob.polymarket.com", key=pk, chain_id=POLYGON, creds=creds)
+        usdc_resp = client.get_collateral_balance()
+        current_usdc = float(usdc_resp.get('balance', 0))
+        
+        # Matic Balance
+        w3 = Web3(Web3.HTTPProvider(rpc))
+        address = client.get_address()
+        current_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
+        
+        return current_usdc, current_matic
+    except Exception as e:
+        print(f"Error fetching live blockchain stats: {e}")
+        return 0.0, 0.0
 
 def analyze():
     if not os.path.exists(LOG_FILE):
@@ -13,6 +46,9 @@ def analyze():
         return
 
     # Data Structures
+    start_usdc = 1000.0
+    start_matic = 0.0
+    matic_price = 0.85
     buys = deque() # (timestamp, price, qty)
     sells = deque()
     
@@ -32,10 +68,26 @@ def analyze():
 
     # Regex Patterns
     trade_pattern = re.compile(r"\[(\d{2}:\d{2}:\d{2})\] \[TRADE_FILLED\] (\w+) (\d+\.?\d*) tokens @ (\d+\.\d+)")
-    latency_pattern = re.compile(r"\[(\d{2}:\d{2}:\d{2})\] \[LATENCY\] .*? Mid: (\d+\.\d+)")
+    latency_pattern = re.compile(r"\[(\d{2}:\d{2}:\d{2})\] \[LATENCY\] .*? Matic: \$(\d+\.\d+)")
+    toxic_flow_pattern = re.compile(r"\[(\d{2}:\d{2}:\d{2})\] \[LATENCY\] .*? Mid: (\d+\.\d+)")
+    start_usdc_pattern = re.compile(r"\[START_BALANCE\] USDC: (\d+\.\d+)")
+    start_matic_pattern = re.compile(r"\[START_BALANCE\] MATIC: (\d+\.\d+)")
 
     with open(LOG_FILE, "r") as f:
         for line in f:
+            # 0. Parse Start Balances
+            su_match = start_usdc_pattern.search(line)
+            if su_match: start_usdc = float(su_match.group(1))
+            sm_match = start_matic_pattern.search(line)
+            if sm_match: start_matic = float(sm_match.group(1))
+            
+            # 0.1 Update Matic Price for current state
+            lat_match = latency_pattern.search(line)
+            if lat_match: 
+                # We reuse lat_match later for toxic checks too, but here we grab matic
+                ts_str, m_price = lat_match.groups()
+                matic_price = float(m_price)
+
             # 1. Parse Trades
             trade_match = trade_pattern.search(line)
             if trade_match:
@@ -92,7 +144,7 @@ def analyze():
                         sells.append((ts, price, qty))
 
             # 2. Parse Latency (Midpoint for Toxic Flow)
-            lat_match = latency_pattern.search(line)
+            lat_match = toxic_flow_pattern.search(line)
             if lat_match:
                 ts_str, mid = lat_match.groups()
                 mid = float(mid)
@@ -142,6 +194,35 @@ def analyze():
     print("-" * 50)
     print(f" {'Total Volume':<25} | ${total_volume:>14.2f} ")
     print(f" {'Round Trips':<25} | {round_trips:>15} ")
+    print("="*50 + "\n")
+
+    # Discrepancy Report
+    current_usdc, current_matic = get_live_stats()
+    usdc_delta = current_usdc - start_usdc
+    gas_spent = start_matic - current_matic
+    true_alpha = usdc_delta - (gas_spent * matic_price)
+    
+    discrepancy = true_alpha - realized_pnl
+    
+    print("="*50)
+    print(" QUESQUANT HFT - BLOCKCHAIN DISCREPANCY REPORT ")
+    print("="*50)
+    print(f" {'Metric':<25} | {'Value':<15} ")
+    print("-" * 50)
+    print(f" {'Initial USDC (Logs)':<25} | ${start_usdc:>14.2f} ")
+    print(f" {'Current USDC (Chain)':<25} | ${current_usdc:>14.2f} ")
+    print(f" {'USDC Delta':<25} | ${usdc_delta:>14.2f} ")
+    print(f" {'Gas Spent (MATIC)':<25} | {gas_spent:>15.4f} ")
+    print(f" {'Gas Cost (USD)':<25} | ${gas_spent*matic_price:>14.4f} ")
+    print("-" * 50)
+    print(f" {'True Alpha (Blockchain)':<25} | ${true_alpha:>14.2f} ")
+    print(f" {'Log PnL (Theoretical)':<25} | ${realized_pnl:>14.2f} ")
+    print(f" {'Discrepancy (Leakage)':<25} | ${discrepancy:>14.2f} ")
+    print("-" * 50)
+    if abs(discrepancy) > 1.0:
+        print(" [WARNING] Significant Discrepancy Detected! Check for fees/slippage.")
+    else:
+        print(" [STATUS] Wallet Delta aligns with theoretical PnL.")
     print("="*50 + "\n")
 
     # CSV Append for Historical Audit
