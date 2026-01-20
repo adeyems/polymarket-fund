@@ -3,3 +3,7 @@ python-dotenv
 requests
 web3
 pytest
+fastapi
+hypercorn
+boto3
+pydantic

@@ -17,6 +17,7 @@ from py_clob_client.constants import POLYGON
 
 # Import Shared Schemas
 from core.shared_schemas import TradeData, BotParams
+from core.monitoring.metrics_exporter import get_metrics_exporter
 
 # Load environment variables
 load_dotenv()
@@ -39,9 +40,9 @@ def get_usdc_balance(address, collateral_address):
 def fetch_target_markets():
     # MOCK MARKET for Simulation
     return [{
-        "question": "Will Solana hit $135 by 2026? (Simulation)",
+        "question": "Will Trump deport less than 250,000?",
         "enableOrderBook": True,
-        "clobTokenIds": ["1234567890"],
+        "clobTokenIds": json.dumps(["101676997363687199724245607342877036148401850938023978421879460310389391082353"]),
         "liquidity": 1000000
     }]
 
@@ -98,6 +99,10 @@ def parse_strike_price(question):
 
 async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     print(f"[BOT] Starting Async Trading Bot...")
+    
+    # 0. Initialize Metrics Exporter
+    metrics = get_metrics_exporter()
+    metrics.start()
     
     # 1. Setup Client
     pk = os.getenv("POLYMARKET_PRIVATE_KEY")
@@ -175,7 +180,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
             continue
 
         loop_start = time.time()
-        # print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Tick...")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Tick...")
         
         try:
             # Per-Tick Variables
@@ -387,6 +392,13 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                             buying_power=round(current_cash, 2)
                         )
                         queue.put_nowait(trade_data.dict())
+
+                        # Update Metrics
+                        metrics.update(
+                            tick_to_trade_latency_ms=latency_ms,
+                            pnl_session=virtual_pnl,
+                            inventory_imbalance=int(theoretical_position)
+                        )
 
                         # Execute (Mock/Live)
                         if MOCK_TRADING:

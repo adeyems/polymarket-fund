@@ -43,7 +43,8 @@ resource "aws_iam_role_policy" "secrets_access" {
           "secretsmanager:DescribeSecret"
         ]
         Resource = [
-          "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/*"
+          "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/*",
+          "arn:aws:secretsmanager:${var.aws_region}:*:secret:prod/polymarket/*"
         ]
       }
     ]
@@ -69,8 +70,30 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
           "logs:DescribeLogStreams"
         ]
         Resource = [
-          "arn:aws:logs:${var.aws_region}:*:log-group:${var.project_name}/*"
+          "arn:aws:logs:${var.aws_region}:*:log-group:${var.project_name}/*",
+          "arn:aws:logs:${var.aws_region}:*:log-group:/${var.project_name}/*"
         ]
+      }
+    ]
+  })
+}
+
+# -----------------------------------------------------------------------------
+# Policy: Write to CloudWatch Metrics
+# -----------------------------------------------------------------------------
+resource "aws_iam_role_policy" "cloudwatch_metrics" {
+  name = "${var.project_name}-cloudwatch-metrics"
+  role = aws_iam_role.trading_node.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData"
+        ]
+        Resource = ["*"]
       }
     ]
   })

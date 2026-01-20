@@ -8,6 +8,8 @@ import threading
 import secrets
 import queue as sync_queue
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+load_dotenv()
 
 from core.shared_schemas import TradeData, BotParams, KillSwitchRequest
 
