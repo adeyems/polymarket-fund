@@ -38,35 +38,29 @@ async def lifespan(app: FastAPI):
     global queue, bot_state
     
     print("[API] Starting API Bridge...")
-    
-    # Init State
     queue = sync_queue.Queue()
     bot_state = BotParams()
-    
     app.state.queue = queue
     app.state.bot_state = bot_state
     
-    # Start Broadcast Loop
     broadcast_task = asyncio.create_task(broadcast_loop(queue))
     
-    print("[SYSTEM] Background Tasks Started.")
+    # Store thread/loop references for cleanup
+    bot_loop = None
     
     def bot_thread_target(q, state):
+        nonlocal bot_loop
         print(f"[THREAD] Bot Thread Started (PID: {os.getpid()})")
-        # DELAYED IMPORT to avoid hanging the main API startup
         try:
             from core.market_maker import run_bot
-            print("[THREAD] Bot Logic Imported. Starting loop...")
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_bot(q, state))
+            bot_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(bot_loop)
+            bot_loop.run_until_complete(run_bot(q, state))
         except Exception as e:
-            print(f"[THREAD] Bot CRASHED during import or loop: {e}")
+            print(f"[THREAD] Bot CRASHED: {e}")
         finally:
-            print("[THREAD] Bot Thread Exiting")
+            print("[THREAD] Bot Thread Exited.")
 
-    # Start Trading Bot in Daemon Thread (Killed on Ctrl+C)
     t = threading.Thread(target=bot_thread_target, args=(queue, bot_state), daemon=True)
     t.start()
     
@@ -75,9 +69,14 @@ async def lifespan(app: FastAPI):
     # Shutdown logic
     print("[API] Shutting down...")
     bot_state.is_running = False
-    broadcast_task.cancel()
     
-    # Manual cleanup for orders if needed (Implementation depends on client access)
+    # Give the bot loop a chance to process the shutdown
+    if bot_loop:
+        for task in asyncio.all_tasks(bot_loop):
+            task.cancel()
+        bot_loop.stop()
+    
+    broadcast_task.cancel()
     print("[API] Graceful shutdown complete.")
 
 app = FastAPI(title="Polymarket Bot Bridge", lifespan=lifespan)

@@ -7,7 +7,7 @@
 set -e
 
 REMOTE_IP="100.50.168.104"
-SSH_KEY="infra/live/prod/quesquant-key.pem"
+SSH_KEY="infra/live/prod/quesquant-key-v2"
 APP_DIR="/app/hft"
 
 echo "🚀 Starting Deployment to $REMOTE_IP..."
