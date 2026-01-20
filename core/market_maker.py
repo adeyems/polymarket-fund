@@ -161,18 +161,13 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                     print("[BOT] Bot Paused. Waiting for activation...")
                     await asyncio.sleep(5)
                     continue
-            # Heartbeat (CloudWatch)
-            metrics.push_heartbeat()
-            
-            # Kill Switch Check
-            if not bot_state.is_running:
-                print("[BOT] Bot Paused. Waiting for activation...")
-                await asyncio.sleep(5)
-                continue
 
-            loop_start = time.time()
-            
-            # --- PROCESS PENDING FILLS (RE-ORG PROTECTION) ---
+                # 1. Heartbeat (CloudWatch)
+                metrics.push_heartbeat()
+                
+                loop_start = time.time()
+                
+                # --- PROCESS PENDING FILLS (RE-ORG PROTECTION) ---
             current_time = time.time()
             confirmed_fills = []
             for fill in pending_fills:
