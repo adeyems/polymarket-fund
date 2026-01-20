@@ -114,6 +114,11 @@ class MetricsExporter:
             # Always update heartbeat
             self._metrics.heartbeat = 1
     
+    def push_heartbeat(self):
+        """Dedicated method to pulse the heartbeat and ensure the background loop stays alive."""
+        with self._lock:
+            self._metrics.heartbeat = 1
+    
     def _get_snapshot(self) -> TradingMetrics:
         """Get a thread-safe copy of current metrics."""
         with self._lock:
