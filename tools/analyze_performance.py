@@ -138,5 +138,16 @@ def analyze():
     print(f" {'Round Trips':<25} | {round_trips:>15} ")
     print("="*50 + "\n")
 
+    # CSV Append for Historical Audit
+    HISTORY_FILE = "/var/log/quesquant/perf_history.csv"
+    try:
+        file_exists = os.path.exists(HISTORY_FILE)
+        with open(HISTORY_FILE, "a") as f:
+            if not file_exists:
+                f.write("timestamp,realized_pnl,toxic_ratio,avg_turnover,win_rate,volume,round_trips\n")
+            f.write(f"{datetime.now().isoformat()},{realized_pnl:.2f},{toxic_ratio:.2f},{avg_turnover:.1f},{win_rate:.2f},{total_volume:.2f},{round_trips}\n")
+    except Exception as e:
+        print(f"Warning: Could not write to history file: {e}")
+
 if __name__ == "__main__":
     analyze()
