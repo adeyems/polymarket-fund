@@ -59,10 +59,10 @@ def get_usdc_balance(address, collateral_address):
     return 1000.0
 
 def fetch_target_markets():
-    """Fetch top liquid Bitcoin market from Gamma API directly."""
+    """Fetch top liquid CLOB market from Gamma API directly."""
     try:
-        # Search for high-volume active Bitcoin markets
-        url = f"{GAMMA_API_URL}?limit=50&active=true&closed=false&order=volume&descending=true&tag_slug=bitcoin"
+        # Search for high-volume active markets (Global, no tag restriction)
+        url = f"{GAMMA_API_URL}?limit=100&active=true&closed=false&order=volume&descending=true"
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         markets = resp.json()
@@ -70,6 +70,7 @@ def fetch_target_markets():
         valid_markets = []
         for m in markets:
             # Must have Order Book enabled and be a "Binary" market (usually implied by clobTokenIds len=2)
+            # We accept ANY high volume market now to ensure liveness
             if m.get('enableOrderBook') and m.get('clobTokenIds'):
                 valid_markets.append(m)
         
@@ -109,7 +110,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     metrics = get_metrics_exporter()
     metrics.start()
     
-    binance = get_binance_manager(["btcusdt", "ethusdt", "solusdt", "maticusdt"])
+    binance = get_binance_manager(["btcusd", "ethusd", "solusd", "maticusd"])
     binance.start()
     
     # 1. Setup Client
