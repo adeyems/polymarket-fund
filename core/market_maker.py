@@ -118,10 +118,11 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},{"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}]
 
     if MOCK_TRADING:
-        start_usdc = 100.00  # Soak Test Baseline
-        start_matic = 94.00  # Soak Test Baseline
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SOAK_CONFIG] Using Mock Starting Balances: ${start_usdc} USDC, {start_matic} POL")
+        start_usdc = 100.00  # High-Fidelity Soak Baseline
+        start_matic = 10.00  # High-Fidelity Soak Baseline
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [SOAK_CONFIG] Using High-Fidelity Mock Balances: ${start_usdc} USDC, {start_matic} POL")
     else:
+        # (existing live fetch logic)
         start_usdc = 1000.0
         start_matic = 0.0
         try:
@@ -142,6 +143,12 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     
     initial_cash = start_usdc
     current_cash = initial_cash
+    current_matic = start_matic
+    
+    total_gas_spent = 0.0
+    total_fees_paid = 0.0
+    total_trades_count = 0
+    
     theoretical_position = 0.0
     session_volume = 0.0
     
@@ -151,6 +158,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
 
     last_midpoint = None
     last_check_time = time.time()
+    last_audit_time = time.time()
 
     # --- MAIN ENGINE LOOP ---
     try:
@@ -181,6 +189,13 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                         else:
                             theoretical_position -= qty
                             current_cash += cost
+                        
+                        if MOCK_TRADING:
+                            fee = cost * 0.001 # 0.1% Taker Fee
+                            current_cash -= fee
+                            total_fees_paid += fee
+                            total_trades_count += 1
+                            
                         session_volume += cost
                         confirmed_fills.append(fill)
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] [TRADE_FILLED] {fill['side']} {qty} tokens @ {price:.3f}")
@@ -270,6 +285,12 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                         if orders:
                             # Telemetry Update
                             total_equity = current_cash + (theoretical_position * midpoint)
+                            if MOCK_TRADING:
+                                # Net PnL = Trading Profit - Total Fees - (Total Gas * Matic Price)
+                                # total_equity already subtracts fees from current_cash. 
+                                # We must explicitly subtract gas cost for "True Alpha" representation.
+                                total_equity -= (total_gas_spent * matic_price)
+                            
                             virtual_pnl = total_equity - initial_cash
                             
                             trade_data = TradeData(
@@ -299,6 +320,11 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
 
                             if MOCK_TRADING:
                                 # Mock Fills (30% probability per tick)
+                                # Apply Gas for Order Placement
+                                gas_cost = 0.03 * len(orders)
+                                current_matic -= gas_cost
+                                total_gas_spent += gas_cost
+
                                 if random.random() < 0.3:
                                     chosen = random.choice(orders)
                                     pending_fills.append({'side': chosen['side'], 'qty': chosen['size'], 'fill_time': time.time(), 'price': chosen['price']})
@@ -313,6 +339,13 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                         break # Single market per tick for latency optimization
                 except Exception as market_e:
                     print(f"Market Cycle Error: {market_e}")
+
+                # 6. Periodic Simulation Audit (Every 4 Hours)
+                if MOCK_TRADING and (time.time() - last_audit_time >= 14400):
+                    last_audit_time = time.time()
+                    total_equity = current_cash + (theoretical_position * (midpoint or 0.5)) - (total_gas_spent * (matic_price or 0.85))
+                    net_profit = total_equity - initial_cash
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [SIM_AUDIT] Trades: {total_trades_count} | Gross PnL: ${net_profit + total_fees_paid + (total_gas_spent * 0.85):.2f} | Est Gas Paid: ${total_gas_spent * 0.85:.3f} | Net Profit: ${net_profit:.2f}")
 
             except Exception as loop_e:
                 error_logger.exception("Critical Loop Error")
