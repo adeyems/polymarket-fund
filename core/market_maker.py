@@ -363,6 +363,10 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                             
                             virtual_pnl = total_equity - initial_cash
                             
+                            action_label = "TRADE_PLACED"
+                            if not significant_move and force_update:
+                                action_label = "HEARTBEAT"
+                            
                             trade_data = TradeData(
                                 timestamp=datetime.now().isoformat(),
                                 token_id=token_id,
@@ -373,7 +377,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                                 vol_state=vol_state,
                                 binance_price=binance_price,
                                 inventory=float(theoretical_position),
-                                action="TRADE_PLACED",
+                                action=action_label,
                                 virtual_pnl=round(virtual_pnl, 2),
                                 session_volume=round(session_volume, 2),
                                 total_equity=round(total_equity, 2),
