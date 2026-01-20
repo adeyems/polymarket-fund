@@ -141,6 +141,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                         current_cash += cost
                     session_volume += cost
                     confirmed_fills.append(fill)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [TRADE_FILLED] {fill['side']} {qty} tokens @ {price:.3f}")
             for fill in confirmed_fills: pending_fills.remove(fill)
 
             # --- MARKET DATA CYCLE ---
@@ -158,7 +159,10 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                     # Filtering Logic
                     q_lower = question.lower()
                     if not any(k in q_lower for k in ["bitcoin", "btc", "ethereum", "solana", "crypto"]): continue
-                    if float(target_market.get('liquidity', 0)) < bot_state.min_liquidity: continue
+                    
+                    liquidity = float(target_market.get('liquidity', 0))
+                    if liquidity < bot_state.min_liquidity:
+                        continue
 
                     clob_token_ids = json.loads(target_market.get('clobTokenIds', '[]'))
                     if not clob_token_ids: continue
@@ -175,6 +179,8 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                     best_ask = float(order_book.asks[0].price)
                     midpoint = (best_bid + best_ask) / 2
                     
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] [LATENCY] {latency_ms:.1f}ms | Mid: {midpoint:.3f} | Liq: ${liquidity/1e6:.1f}M")
+
                     # 3. Spread & Volatility Management
                     vol_state = "LOW_VOL"
                     base_spread = bot_state.spread_offset
@@ -238,6 +244,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                             buying_power=round(current_cash, 2)
                         )
                         queue.put_nowait(trade_data.dict())
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] [PnL] Session: ${virtual_pnl:.2f} | Pos: {theoretical_position} | Equity: ${total_equity:.2f}")
                         
                         metrics.update(
                             tick_to_trade_latency_ms=latency_ms,
