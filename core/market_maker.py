@@ -354,11 +354,23 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                                     pending_fills.append({'side': chosen['side'], 'qty': chosen['size'], 'fill_time': time.time(), 'price': chosen['price']})
                             else:
                                 # Live Execution
-                                live_orders = [
-                                    OrderArgs(price=o['price'], size=o['size'], side=o['side'], token_id=token_id)
-                                    for o in orders
-                                ]
-                                await asyncio.to_thread(client.post_orders, live_orders)
+                                from py_clob_client.clob_types import OrderType
+                                from py_clob_client.order_builder.constants import BUY, SELL
+                                
+                                for o in orders:
+                                    try:
+                                        side_const = BUY if o['side'] == 'BUY' else SELL
+                                        order_args = OrderArgs(
+                                            token_id=token_id,
+                                            price=o['price'],
+                                            size=o['size'],
+                                            side=side_const
+                                        )
+                                        signed_order = client.create_order(order_args)
+                                        resp = client.post_order(signed_order, OrderType.GTC)
+                                        print(f"[LIVE_ORDER] {o['side']} {o['size']} @ {o['price']} -> {resp.get('orderID', 'OK')}")
+                                    except Exception as order_e:
+                                        print(f"[ORDER_ERROR] {o['side']}: {order_e}")
                         
                         break # Single market per tick for latency optimization
                 except Exception as market_e:
