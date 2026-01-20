@@ -103,24 +103,27 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     print(f"[BOT] Starting Production-Grade Trading Bot (MOCK_TRADING={MOCK_TRADING})")
     
     # Fetch real baseline from chain (even if mocking, we want to see the starting wallet state)
-    try:
-        usdc_resp = await asyncio.to_thread(client.get_collateral_balance)
-        start_usdc = float(usdc_resp.get('balance', 0))
-    except:
-        start_usdc = 1000.0
-        
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] USDC: {start_usdc:.2f}")
-    
-    # 2.1 Fetch Matic Balance for Gas Tracking
-    start_matic = 0.0
     from web3 import Web3
+    from eth_account import Account
     rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
+    USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    ERC20_ABI = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},{"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}]
+
+    start_usdc = 1000.0
+    start_matic = 0.0
     try:
         w3 = Web3(Web3.HTTPProvider(rpc))
-        start_matic = float(w3.from_wei(w3.eth.get_balance(creds_obj.address if hasattr(creds_obj, 'address') else client.get_address()), 'ether'))
-    except Exception as e:
-        print(f"[ERROR] Matic Balance Fetch Failed: {e}")
+        address = Account.from_key(pk).address
+        start_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
         
+        usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
+        raw_balance = usdc_contract.functions.balanceOf(address).call()
+        decimals = usdc_contract.functions.decimals().call()
+        start_usdc = raw_balance / (10 ** decimals)
+    except Exception as e:
+        print(f"[ERROR] Balance Fetch Failed: {e}")
+        
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] USDC: {start_usdc:.2f}")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] MATIC: {start_matic:.4f}")
     
     initial_cash = start_usdc

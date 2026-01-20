@@ -18,22 +18,28 @@ def get_live_stats():
     load_dotenv(ENV_FILE)
     pk = os.getenv("POLYMARKET_PRIVATE_KEY")
     rpc = os.getenv("POLYGON_RPC", "https://polygon-rpc.com")
-    creds = ApiCreds(
-        api_key=os.getenv("CLOB_API_KEY"),
-        api_secret=os.getenv("CLOB_SECRET"),
-        api_passphrase=os.getenv("CLOB_PASSPHRASE")
-    )
     if not pk: return 0.0, 0.0
+    
+    USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" # USDC.e
+    ERC20_ABI = [
+        {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"},
+        {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"}
+    ]
+
     try:
         from web3 import Web3
-        client = ClobClient("https://clob.polymarket.com", key=pk, chain_id=POLYGON, creds=creds)
-        usdc_resp = client.get_collateral_balance()
-        current_usdc = float(usdc_resp.get('balance', 0))
+        w3 = Web3(Web3.HTTPProvider(rpc))
+        from eth_account import Account
+        address = Account.from_key(pk).address
         
         # Matic Balance
-        w3 = Web3(Web3.HTTPProvider(rpc))
-        address = client.get_address()
         current_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
+        
+        # USDC Balance
+        usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
+        raw_balance = usdc_contract.functions.balanceOf(address).call()
+        decimals = usdc_contract.functions.decimals().call()
+        current_usdc = raw_balance / (10 ** decimals)
         
         return current_usdc, current_matic
     except Exception as e:
