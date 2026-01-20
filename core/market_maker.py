@@ -365,7 +365,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                             
                             action_label = "TRADE_PLACED"
                             if not significant_move and force_update:
-                                action_label = "" # Silent Heartbeat
+                                action_label = "HEARTBEAT"
                             
                             trade_data = TradeData(
                                 timestamp=datetime.now().isoformat(),
