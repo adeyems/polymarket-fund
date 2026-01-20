@@ -282,7 +282,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
 
                     for target_market in markets:
                         question = target_market.get('question', 'Unknown')
-                        if not target_market.get('enableOrderBook'): continue
+                        # if not target_market.get('enableOrderBook'): continue # HANDLED IN DISCOVERY
                         
                         # Filtering Logic
                         q_lower = question.lower()
