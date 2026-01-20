@@ -169,6 +169,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     total_fees_paid = 0.0
     total_trades_count = 0
     total_order_updates = 0
+    last_telemetry_time = time.time()
     
     theoretical_position = 0.0
     session_volume = 0.0
@@ -316,8 +317,16 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                                     significant_move = True
                                     break
                             
-                            if not significant_move:
-                                continue # SKIP UPDATE: Price move is < 2 cents
+                            
+                            # Force heartbeat every 5 seconds
+                            current_time = time.time()
+                            force_update = (current_time - last_telemetry_time) >= 5.0
+                            
+                            if not significant_move and not force_update:
+                                continue # SKIP UPDATE: Price move is < 0.5 cents AND no heartbeat needed
+
+                            if force_update:
+                                last_telemetry_time = current_time
 
                             # Update active prices
                             for o in orders:
