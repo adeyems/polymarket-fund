@@ -18,7 +18,13 @@ def get_live_stats():
     load_dotenv(ENV_FILE)
     pk = os.getenv("POLYMARKET_PRIVATE_KEY")
     # Try multiple RPCs to avoid rate limits
-    rpcs = [os.getenv("POLYGON_RPC"), "https://polygon-rpc.com", "https://rpc-mainnet.maticvigil.com"]
+    rpcs = [
+        os.getenv("POLYGON_RPC"), 
+        "https://polygon-rpc.com", 
+        "https://rpc-mainnet.maticvigil.com",
+        "https://1rpc.io/matic",
+        "https://rpc.ankr.com/polygon"
+    ]
     rpcs = [r for r in rpcs if r]
     
     if not pk: return 0.0, 0.0, "UNKNOWN"
