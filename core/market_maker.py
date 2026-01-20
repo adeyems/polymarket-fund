@@ -292,7 +292,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                             
                             for o in orders:
                                 last_p = active_order_prices[token_id].get(o["side"], 0)
-                                if abs(o["price"] - last_p) >= 0.02:
+                                if abs(o["price"] - last_p) >= 0.005:  # TUNED: Reduced from 0.02 to 0.005
                                     significant_move = True
                                     break
                             
