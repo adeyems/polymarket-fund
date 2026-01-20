@@ -155,6 +155,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
     pending_fills = []
     BLOCK_TIME = 4.0 
     price_history = {} 
+    active_order_prices = {} # {token_id: {"BUY": price, "SELL": price}}
 
     last_midpoint = None
     last_check_time = time.time()
@@ -243,7 +244,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
 
                         # 3. Spread & Volatility Management
                         vol_state = "LOW_VOL"
-                        base_spread = bot_state.spread_offset - 0.0001
+                        base_spread = 0.005  # NARROW SPREAD: Reduced from 0.01 to 0.005 for better fills
                         
                         if token_id not in price_history: price_history[token_id] = []
                         price_history[token_id].append((current_time, midpoint))
@@ -283,12 +284,28 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
                         if allow_sell: orders.append({"side": "SELL", "price": sell_price, "size": bot_state.order_size})
 
                         if orders:
+                            # Lazy Updating Threshold (0.02)
+                            significant_move = False
+                            if token_id not in active_order_prices:
+                                active_order_prices[token_id] = {"BUY": 0, "SELL": 0}
+                            
+                            for o in orders:
+                                last_p = active_order_prices[token_id].get(o["side"], 0)
+                                if abs(o["price"] - last_p) >= 0.02:
+                                    significant_move = True
+                                    break
+                            
+                            if not significant_move:
+                                continue # SKIP UPDATE: Price move is < 2 cents
+
+                            # Update active prices
+                            for o in orders:
+                                active_order_prices[token_id][o["side"]] = o["price"]
+
                             # Telemetry Update
                             total_equity = current_cash + (theoretical_position * midpoint)
                             if MOCK_TRADING:
                                 # Net PnL = Trading Profit - Total Fees - (Total Gas * Matic Price)
-                                # total_equity already subtracts fees from current_cash. 
-                                # We must explicitly subtract gas cost for "True Alpha" representation.
                                 total_equity -= (total_gas_spent * matic_price)
                             
                             virtual_pnl = total_equity - initial_cash
@@ -320,7 +337,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
 
                             if MOCK_TRADING:
                                 # Mock Fills (30% probability per tick)
-                                # Apply Gas for Order Placement
+                                # Apply Gas ONLY for significant moves
                                 gas_cost = 0.03 * len(orders)
                                 current_matic -= gas_cost
                                 total_gas_spent += gas_cost
