@@ -47,6 +47,7 @@ def get_live_stats():
             
             return current_usdc, current_matic, address
         except Exception as e:
+            print(f"RPC Error ({rpc}): {e}")
             continue
             
     return 0.0, 0.0, address
@@ -57,7 +58,7 @@ def analyze():
         return
 
     # Data Structures
-    start_usdc = 1000.0
+    start_usdc = 100.0 # Default fallback if not found in logs
     start_matic = 0.0
     matic_price = 0.85
     buys = deque() # (timestamp, price, qty)

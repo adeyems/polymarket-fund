@@ -143,20 +143,43 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] [SOAK_CONFIG] Using High-Fidelity Mock Balances: ${start_usdc} USDC, {start_matic} POL")
     else:
         # (existing live fetch logic)
-        start_usdc = 1000.0
+        start_usdc = 100.0 # Default safe fallback
         start_matic = 0.0
-        try:
-            w3 = Web3(Web3.HTTPProvider(rpc))
-            address = Account.from_key(pk).address
-            start_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
-            
-            usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
-            raw_balance = usdc_contract.functions.balanceOf(address).call()
-            decimals = usdc_contract.functions.decimals().call()
-            start_usdc = raw_balance / (10 ** decimals)
-        except Exception as e:
-            error_logger.error(f"Balance Fetch Failed: {e}")
-            print(f"[ERROR] Balance Fetch Failed: {e}")
+        
+        # Robust Fetch with Retries
+        rpcs = [
+            os.getenv("POLYGON_RPC"), 
+            "https://polygon-rpc.com", 
+            "https://rpc-mainnet.maticvigil.com",
+            "https://1rpc.io/matic"
+        ]
+        rpcs = [r for r in rpcs if r]
+        
+        fetched = False
+        for rpc_url in rpcs:
+            if fetched: break
+            try:
+                print(f"[INIT] Fetching balances via {rpc_url}...")
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                address = Account.from_key(pk).address
+                
+                # MATIC
+                start_matic = float(w3.from_wei(w3.eth.get_balance(address), 'ether'))
+                
+                # USDC
+                usdc_contract = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_ABI)
+                raw_balance = usdc_contract.functions.balanceOf(address).call()
+                decimals = usdc_contract.functions.decimals().call()
+                start_usdc = raw_balance / (10 ** decimals)
+                fetched = True
+                print(f"[INIT] Balances Fetched: ${start_usdc} USDC | {start_matic} MATIC")
+            except Exception as e:
+                print(f"[WARN] RPC Failed ({rpc_url}): {e}")
+                time.sleep(1)
+        
+        if not fetched:
+            error_logger.error("All RPCs failed to fetch start balance. Using mock default.")
+            print("[ERROR] All RPCs failed. Defaulting to safe baseline.")
         
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] USDC: {start_usdc:.2f}")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [START_BALANCE] MATIC: {start_matic:.4f}")
