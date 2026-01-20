@@ -69,9 +69,10 @@ def fetch_target_markets():
         
         valid_markets = []
         for m in markets:
-            # Must have Order Book enabled and be a "Binary" market (usually implied by clobTokenIds len=2)
-            # We accept ANY high volume market now to ensure liveness
-            if m.get('enableOrderBook') and m.get('clobTokenIds'):
+            # Must have CLOB Token IDs (Ignore enableOrderBook as it seems buggy/false for everything)
+            # Filter out short-term "5m" or "Up or Down" markets to ensure stability
+            q_text = m.get('question', '').lower()
+            if m.get('clobTokenIds') and "5m" not in q_text and "up or down" not in q_text:
                 valid_markets.append(m)
         
         if valid_markets:
@@ -79,7 +80,13 @@ def fetch_target_markets():
             print(f"[MARKET-DISCOVERY] Found Liquid Market: {top_market.get('question')} (Vol: ${top_market.get('volumeNum'):.0f})")
             return [top_market]
         
-        print("[MARKET-DISCOVERY] No liquid CLOB markets found via API. Falling back to hardcoded 2024...")
+        print("[MARKET-DISCOVERY] No stable CLOB markets found (filtered 5m). Retrying raw list...")
+        # Fallback: Just take the top volume one even if it is 5m, better than dead.
+        if markets and markets[0].get('clobTokenIds'):
+             m = markets[0]
+             print(f"[MARKET-DISCOVERY] Fallback to Top Volume: {m.get('question')}")
+             return [m]
+
         return []
     except Exception as e:
         print(f"[MARKET-DISCOVERY] API Error: {e}")
