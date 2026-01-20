@@ -183,7 +183,7 @@ async def run_bot(queue: asyncio.Queue, bot_state: BotParams):
 
                     # 3. Spread & Volatility Management
                     vol_state = "LOW_VOL"
-                    base_spread = bot_state.spread_offset
+                    base_spread = bot_state.spread_offset - 0.0001
                     
                     if token_id not in price_history: price_history[token_id] = []
                     price_history[token_id].append((current_time, midpoint))

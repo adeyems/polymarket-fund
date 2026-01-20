@@ -99,19 +99,25 @@ def analyze():
                 
                 processed_checks = []
                 for check in adverse_checks:
-                    # If this midpoint is after the fill
-                    if check['side'] == 'BUY' and mid < check['price']:
+                    # Time threshold (1s)
+                    time_diff = (ts - check['time']).total_seconds()
+                    if time_diff > 1.2: # Allow small buffer for loop jitter
+                        total_toxic_checks += 1
+                        processed_checks.append(check)
+                        continue
+                        
+                    # 0.5% move threshold
+                    threshold = check['price'] * 0.005
+                    
+                    if check['side'] == 'BUY' and (mid < (check['price'] - threshold)):
                         toxic_hits += 1
                         total_toxic_checks += 1
                         processed_checks.append(check)
-                    elif check['side'] == 'SELL' and mid > check['price']:
+                    elif check['side'] == 'SELL' and (mid > (check['price'] + threshold)):
                         toxic_hits += 1
                         total_toxic_checks += 1
                         processed_checks.append(check)
-                    else:
-                        # Only check the immediate next midpoint for "Toxic Flow"
-                        total_toxic_checks += 1
-                        processed_checks.append(check)
+                    # If we have a mid within 1s but not toxic, we keep checking until 1s passes or it hits toxic
                 
                 for p in processed_checks:
                     adverse_checks.remove(p)
