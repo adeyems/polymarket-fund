@@ -5,6 +5,26 @@ import json
 import csv
 import random
 import requests
+import requests.sessions
+
+# --- CLOUDFLARE BYPASS PATCH ---
+# Patch requests to use a browser User-Agent globally
+original_request = requests.sessions.Session.request
+def patched_request(self, method, url, *args, **kwargs):
+    headers = kwargs.get("headers")
+    if headers is None:
+        headers = {}
+    
+    # Inject Browser User-Agent if missing or default
+    ua = headers.get("User-Agent", "")
+    if "User-Agent" not in headers or "python-requests" in ua:
+        headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    
+    kwargs["headers"] = headers
+    return original_request(self, method, url, *args, **kwargs)
+
+requests.sessions.Session.request = patched_request
+# -------------------------------
 import re
 import statistics
 import asyncio
