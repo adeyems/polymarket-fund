@@ -37,11 +37,11 @@ class BotParams(BaseModel):
     Dynamic parameters that can be updated via the API.
     """
     spread_offset: float = Field(0.005, description="Base spread offset in dollars (e.g., 0.005 = 0.5 cents)")
-    order_size: int = Field(25, description="Standard order size in shares")
+    order_size: int = Field(10, description="Standard order size in shares (LIVE: Conservative)")
     is_running: bool = Field(True, description="Master switch for the trading loop")
     
     # Advanced 
-    max_position: int = Field(250, description="Max absolute position size")
+    max_position: int = Field(50, description="Max absolute position size (LIVE: Conservative)")
     min_liquidity: float = Field(10000.0, description="Minimum market liquidity to trade")
 
 class KillSwitchRequest(BaseModel):
