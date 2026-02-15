@@ -1,5 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import asyncio
 import json
 import os
@@ -12,6 +14,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.shared_schemas import TradeData, BotParams, KillSwitchRequest
+from pathlib import Path
+import sys
+
+# Add sovereign_hive to path for backtest imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "sovereign_hive"))
 
 # Mock or real client reference for shutdown
 # In a real scenario, we'd want this handed back from the bot thread
@@ -89,6 +96,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static files (dashboard UI)
+static_dir = Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+@app.get("/")
+async def serve_dashboard():
+    """Serve the dashboard UI."""
+    index_path = static_dir / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {"message": "Dashboard not found. Visit /docs for API documentation."}
 
 # --- WEBSOCKET MANAGER ---
 class ConnectionManager:
@@ -176,6 +196,153 @@ async def emergency_stop(req: KillSwitchRequest):
 async def health_check():
     # Public Health Check
     return {"status": "ok", "connections": len(manager.active_connections)}
+
+# --- BACKTEST ENDPOINTS ---
+
+@app.get("/api/v1/backtest/strategies")
+async def get_available_strategies():
+    """Get list of available backtest strategies."""
+    try:
+        from backtest.engine import BUILTIN_STRATEGIES
+        return {
+            "strategies": list(BUILTIN_STRATEGIES.keys()),
+            "recommended": "MEAN_REVERSION",
+            "disabled": ["DIP_BUY"]  # Underperforming strategies
+        }
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Backtest module not available: {e}")
+
+@app.get("/api/v1/backtest/optimized-config")
+async def get_optimized_config():
+    """Get the optimized strategy configuration from backtesting."""
+    config_path = Path(__file__).parent.parent / "sovereign_hive" / "config" / "optimized_strategies.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            return json.load(f)
+    return {
+        "error": "No optimized config found",
+        "default_config": {
+            "max_position_pct": 0.15,
+            "take_profit_pct": 0.10,
+            "stop_loss_pct": -0.05,
+            "kelly_fraction": 0.15
+        }
+    }
+
+@app.post("/api/v1/backtest/run")
+async def run_backtest(
+    strategy: str = "MEAN_REVERSION",
+    days: int = 30,
+    markets: int = 30,
+    capital: float = 10000
+):
+    """
+    Run a quick backtest with synthetic data.
+    For live API data backtests, use the CLI tool.
+    """
+    try:
+        from backtest.data_loader import DataLoader
+        from backtest.engine import BacktestEngine, BacktestConfig, BUILTIN_STRATEGIES
+
+        if strategy not in BUILTIN_STRATEGIES:
+            raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
+
+        # Load synthetic data (fast)
+        loader = DataLoader()
+        loader.generate_synthetic(num_markets=markets, days=days, interval_hours=1)
+
+        # Configure with optimized parameters
+        config = BacktestConfig(
+            initial_capital=capital,
+            use_kelly=True,
+            kelly_fraction=0.15,
+            max_position_pct=0.15,
+            take_profit_pct=0.10,
+            stop_loss_pct=-0.05
+        )
+
+        # Run backtest
+        engine = BacktestEngine(loader, config)
+        engine.add_strategy(strategy, BUILTIN_STRATEGIES[strategy])
+        results = engine.run()
+
+        metrics = results[strategy]
+
+        return {
+            "strategy": strategy,
+            "config": {
+                "days": days,
+                "markets": markets,
+                "capital": capital
+            },
+            "results": metrics.to_dict(),
+            "equity_curve": [
+                {"timestamp": p.timestamp.isoformat(), "equity": p.equity}
+                for p in metrics.equity_curve[::max(1, len(metrics.equity_curve)//100)]  # Sample 100 points
+            ]
+        }
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Backtest module error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {e}")
+
+@app.get("/api/v1/backtest/monte-carlo/{strategy}")
+async def run_monte_carlo(
+    strategy: str,
+    simulations: int = 500,
+    days: int = 30,
+    markets: int = 30
+):
+    """
+    Run Monte Carlo simulation for risk estimation.
+    """
+    try:
+        from backtest.data_loader import DataLoader
+        from backtest.engine import BacktestEngine, BacktestConfig, BUILTIN_STRATEGIES
+        from backtest.monte_carlo import run_monte_carlo_from_metrics
+
+        if strategy not in BUILTIN_STRATEGIES:
+            raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
+
+        # Run backtest first
+        loader = DataLoader()
+        loader.generate_synthetic(num_markets=markets, days=days, interval_hours=1)
+
+        config = BacktestConfig(
+            initial_capital=10000,
+            use_kelly=True,
+            kelly_fraction=0.15,
+            max_position_pct=0.15,
+            take_profit_pct=0.10,
+            stop_loss_pct=-0.05
+        )
+
+        engine = BacktestEngine(loader, config)
+        engine.add_strategy(strategy, BUILTIN_STRATEGIES[strategy])
+        results = engine.run()
+        metrics = results[strategy]
+
+        # Run Monte Carlo
+        mc_result = run_monte_carlo_from_metrics(metrics, simulations, seed=42)
+
+        return {
+            "strategy": strategy,
+            "simulations": simulations,
+            "mean_return_pct": mc_result.mean_return_pct,
+            "median_return_pct": mc_result.median_return_pct,
+            "ci_95": [mc_result.ci_95_lower, mc_result.ci_95_upper],
+            "prob_positive": mc_result.prob_positive_return,
+            "var_95": mc_result.var_95,
+            "var_99": mc_result.var_99,
+            "mean_max_drawdown": mc_result.mean_max_drawdown,
+            "return_distribution": mc_result.all_returns[::max(1, len(mc_result.all_returns)//50)]  # Sample 50 points
+        }
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"Monte Carlo module error: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Monte Carlo failed: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():

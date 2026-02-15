@@ -1,0 +1,22 @@
+{
+  "name": "polymarket-fund",
+  "version": "1.0.0",
+  "description": "Polymarket trading strategies with A/B testing",
+  "scripts": {
+    "test": "pytest tests/ -v",
+    "test:unit": "pytest tests/unit/ -v",
+    "test:integration": "pytest tests/integration/ -v",
+    "test:quick": "pytest tests/unit/ -x --tb=short -q",
+    "test:coverage": "pytest --cov=sovereign_hive --cov-report=html --cov-report=term-missing tests/",
+    "lint": "python -m py_compile sovereign_hive/run_simulation.py sovereign_hive/ab_test/*.py",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  },
+  "lint-staged": {
+    "*.py": [
+      "python -m py_compile"
+    ]
+  }
+}

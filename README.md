@@ -1,19 +1,15 @@
 # The Vault: Private Cloud Trading Node
 
+> [!IMPORTANT]
+> **New Agents:** Please read the [HANDOVER.md](file:///Users/qudus-mac/PycharmProjects/polymarket-fund/HANDOVER.md) for live server access and mission status.
+
+
 **Architecture Standard: v1.0 (Hedge Fund Grade)**
 
 This repository follows the "Vault" architecture, separating infrastructure, core logic, and user interfaces to ensure maximum stability and security for High-Frequency Trading.
 
 ## Directory Structure
-
-### 🔒 `.agent/` (Hidden)
-*   **Purpose**: Dedicated workspace for AI Agents (Gemini/Claude).
-*   **Contents**: Logs, scratchpads, draft specifications, and unused code snippets.
-*   **Status**: Git-ignored in production.
-
-### 🏗️ `infra/` (Terrafom)
-*   **Purpose**: "Infrastructure as Code" (IaC) to provision the AWS cloud environment.
-*   **Stack**: Terraform + AWS.
+so
 *   **Key Components**:
     *   `modules/`: Reusable VPC, Security Group, and IAM definitions.
     *   `live/prod/`: The immutable production state configuration.

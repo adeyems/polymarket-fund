@@ -7,13 +7,14 @@
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
 
 # Terraform
 .terraform/
 *.tfstate
 *.tfstate.backup
 
-# Agent
+# Agent workspace
 .agent/
 !.agent/README.md
 
@@ -24,3 +25,26 @@ __pycache__/
 /infra/live/prod/quesquant-key*
 !/infra/live/prod/quesquant-key-v2.pub
 !/tools/deploy_key_v2.pub
+
+# Runtime data & logs
+sovereign_hive/logs/
+sovereign_hive/data/
+sovereign_hive/sim.log
+sovereign_hive/simulation_state.json
+sovereign_hive/trade_history.json
+sovereign_hive/blackboard.json
+data/
+logs_dump.txt
+
+# Test/coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

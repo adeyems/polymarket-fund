@@ -220,9 +220,13 @@ ws://localhost:8002/api/v1/ws/stream
 ## 7. Frontend Environment Variables
 
 ```env
-# Public (exposed to browser)
+# Option 1: Tunnel (Recommended for Security)
 NEXT_PUBLIC_API_URL=http://localhost:8002
 NEXT_PUBLIC_WS_URL=ws://localhost:8002
+
+# Option 2: Direct Connection (If on VPN/Mesh)
+# NEXT_PUBLIC_API_URL=http://100.50.168.104:8002
+# NEXT_PUBLIC_WS_URL=ws://100.50.168.104:8002
 
 # Private (server-side only, for API route proxies)
 DASHBOARD_API_KEY=eoR9WJziF4rL7k6gJ5GoqlQqFgyQj5u5wmRNnVpLmgc
@@ -246,3 +250,26 @@ DASHBOARD_API_KEY=eoR9WJziF4rL7k6gJ5GoqlQqFgyQj5u5wmRNnVpLmgc
 - **Latency Indicator:** Show warning if `latency_ms > 500`
 - **Kill Switch:** Should be prominent, possibly with confirmation modal
 - **Inventory Display:** Show `inventory` with color coding (green = balanced, red = directional risk)
+
+---
+
+## 9. Handling Heartbeats (Action: "HEARTBEAT")
+
+The backend sends a "Heartbeat" message every 5 seconds to keep the WebSocket connection alive and update top-level metrics (Equity, PnL, etc.).
+
+**These messages MUST be filtered out of the Trade Blotter / Shark Tank.**
+
+### Recommended Frontend Logic (React):
+
+```javascript
+// inside your WebSocket message handler
+const handleMessage = (newData) => {
+  // Always update global metrics (Equity, PnL, Latency)
+  updateMetrics(newData);
+
+  // ONLY add to Trade Logs if it is NOT a heartbeat
+  if (newData.action !== "HEARTBEAT") {
+    setTradeLogs(prevLogs => [newData, ...prevLogs].slice(0, 50));
+  }
+};
+```

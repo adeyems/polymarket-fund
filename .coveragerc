@@ -1,0 +1,32 @@
+[run]
+source = sovereign_hive
+omit =
+    # Agent modules (optional, not core trading)
+    sovereign_hive/agents/*
+    # Alternative run scripts
+    sovereign_hive/run_hive.py
+    sovereign_hive/run_async_hive.py
+    sovereign_hive/test_simulation.py
+    sovereign_hive/report.py
+    # Infrastructure (not trading logic)
+    sovereign_hive/core/gemini_analyzer.py
+    sovereign_hive/core/news_intelligence.py
+    sovereign_hive/core/redis_state.py
+    sovereign_hive/core/ws_listener.py
+    sovereign_hive/core/async_executor.py
+    sovereign_hive/core/claude_analyzer.py
+    sovereign_hive/core/simulation.py
+    sovereign_hive/core/trade_history.py
+    # Dashboard/reporting (not core trading)
+    sovereign_hive/ab_test/compare_strategies.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def main
+    if __name__ == .__main__.:
+    raise NotImplementedError
+fail_under = 70
+
+[html]
+directory = htmlcov

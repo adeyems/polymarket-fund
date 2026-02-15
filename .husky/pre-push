@@ -1,0 +1,26 @@
+#!/bin/sh
+
+echo "========================================"
+echo "  Running Pre-Push Checks"
+echo "========================================"
+
+# Run all tests before pushing
+echo ""
+echo "Running full test suite..."
+pytest tests/ -x --tb=short -q 2>&1
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "========================================"
+    echo "  PUSH BLOCKED: Tests Failed"
+    echo "========================================"
+    echo ""
+    echo "Fix failing tests before pushing."
+    echo "Run: pytest tests/ -v"
+    exit 1
+fi
+
+echo ""
+echo "========================================"
+echo "  All Tests Passed - Pushing ✓"
+echo "========================================"

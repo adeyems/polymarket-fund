@@ -7,3 +7,7 @@ fastapi
 hypercorn
 boto3
 pydantic
+py-cord
+aiohttp
+redis
+websockets

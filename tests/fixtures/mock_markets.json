@@ -1,0 +1,65 @@
+[
+  {
+    "conditionId": "0xmarket1",
+    "question": "Will Bitcoin hit $100k by March 2026?",
+    "bestBid": 0.45,
+    "bestAsk": 0.48,
+    "volume24hr": 50000,
+    "liquidityNum": 100000,
+    "endDate": "2026-03-01T00:00:00Z"
+  },
+  {
+    "conditionId": "0xmarket2",
+    "question": "Will Trump win 2028 election?",
+    "bestBid": 0.95,
+    "bestAsk": 0.97,
+    "volume24hr": 200000,
+    "liquidityNum": 500000,
+    "endDate": "2028-11-05T00:00:00Z"
+  },
+  {
+    "conditionId": "0xmarket3",
+    "question": "Will the Lakers win 2026 NBA Finals?",
+    "bestBid": 0.03,
+    "bestAsk": 0.06,
+    "volume24hr": 30000,
+    "liquidityNum": 80000,
+    "endDate": "2026-06-15T00:00:00Z"
+  },
+  {
+    "conditionId": "0xmarket4",
+    "question": "Will ETH hit $5000 by end of 2026?",
+    "bestBid": 0.25,
+    "bestAsk": 0.30,
+    "volume24hr": 75000,
+    "liquidityNum": 150000,
+    "endDate": "2026-12-31T00:00:00Z"
+  },
+  {
+    "conditionId": "0xmarket5",
+    "question": "Close race market - 50/50",
+    "bestBid": 0.48,
+    "bestAsk": 0.52,
+    "volume24hr": 100000,
+    "liquidityNum": 200000,
+    "endDate": "2026-02-28T00:00:00Z"
+  },
+  {
+    "conditionId": "0xnearzero",
+    "question": "Will something very unlikely happen?",
+    "bestBid": 0.01,
+    "bestAsk": 0.03,
+    "volume24hr": 15000,
+    "liquidityNum": 50000,
+    "endDate": "2026-04-01T00:00:00Z"
+  },
+  {
+    "conditionId": "0xnearcertain",
+    "question": "Will something very likely happen?",
+    "bestBid": 0.96,
+    "bestAsk": 0.98,
+    "volume24hr": 25000,
+    "liquidityNum": 60000,
+    "endDate": "2026-03-15T00:00:00Z"
+  }
+]

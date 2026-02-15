@@ -1,0 +1,50 @@
+{
+  "optimization_date": "2026-02-11",
+  "data_source": "polymarket_api",
+  "data_range": {
+    "start": "2026-01-11",
+    "end": "2026-02-11",
+    "markets": 50
+  },
+  "strategies": {
+    "MEAN_REVERSION": {
+      "rank": 1,
+      "sharpe_ratio": 1.05,
+      "return_pct": 52.24,
+      "max_drawdown_pct": 18.63,
+      "win_rate": 38.5,
+      "profit_factor": 1.37,
+      "parameters": {
+        "max_position_pct": 0.15,
+        "take_profit_pct": 0.10,
+        "stop_loss_pct": -0.05,
+        "use_kelly": true,
+        "kelly_fraction": 0.15
+      },
+      "notes": "Best risk-adjusted returns. Tight stop loss with larger take profit works well."
+    },
+    "VOLUME_SURGE": {
+      "rank": 2,
+      "notes": "Needs volume data from API for accurate signals. Backtest uses price volatility proxy."
+    },
+    "NEAR_CERTAIN": {
+      "rank": 3,
+      "notes": "Works best on markets nearing resolution. Limited by market availability."
+    }
+  },
+  "recommendations": {
+    "primary_strategy": "MEAN_REVERSION",
+    "position_sizing": "Conservative Kelly (15% fraction)",
+    "risk_management": {
+      "stop_loss": "-5% (tighter than typical -10%)",
+      "take_profit": "+10%",
+      "max_positions": 10,
+      "max_position_size": "15% of capital"
+    },
+    "notes": [
+      "Win rate is low (38.5%) but average win > average loss gives positive expectancy",
+      "Sharpe > 1.0 indicates good risk-adjusted returns",
+      "Max drawdown ~19% is acceptable for aggressive strategy"
+    ]
+  }
+}

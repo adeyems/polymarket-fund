@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Strategy Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --yellow: #d29922;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: var(--bg-card);
+            border-radius: 20px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .metric-value {
+            font-size: 28px;
+            font-weight: 700;
+        }
+
+        .metric-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        .positive { color: var(--green); }
+        .negative { color: var(--red); }
+
+        .strategy-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .strategy-table th,
+        .strategy-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .strategy-table th {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+
+        .strategy-table tr:hover {
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        .strategy-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .badge-recommended {
+            background: rgba(63, 185, 80, 0.2);
+            color: var(--green);
+        }
+
+        .badge-disabled {
+            background: rgba(248, 81, 73, 0.2);
+            color: var(--red);
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-top: 15px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #4c9aed;
+        }
+
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--accent);
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        select, input {
+            padding: 10px 15px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: var(--text-muted);
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .monte-carlo-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .mc-stat {
+            text-align: center;
+            padding: 15px;
+            background: rgba(88, 166, 255, 0.1);
+            border-radius: 6px;
+        }
+
+        .mc-stat-value {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .mc-stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+        }
+
+        .tab {
+            padding: 8px 16px;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            color: var(--text);
+            background: var(--bg-card);
+        }
+
+        .tab.active {
+            color: var(--accent);
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        .hidden { display: none; }
+
+        footer {
+            text-align: center;
+            padding: 30px 0;
+            color: var(--text-muted);
+            font-size: 12px;
+            border-top: 1px solid var(--border);
+            margin-top: 40px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Polymarket Strategy Dashboard</h1>
+            <div class="status-badge">
+                <span class="status-dot" id="apiStatus"></span>
+                <span id="apiStatusText">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('overview')">Overview</button>
+            <button class="tab" onclick="showTab('backtest')">Backtest</button>
+            <button class="tab" onclick="showTab('montecarlo')">Monte Carlo</button>
+            <button class="tab" onclick="showTab('config')">Configuration</button>
+        </div>
+
+        <!-- Overview Tab -->
+        <div id="tab-overview">
+            <div class="grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Best Strategy</span>
+                        <span class="strategy-badge badge-recommended">RECOMMENDED</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-value" id="bestStrategy">MEAN_REVERSION</span>
+                        <span class="metric-label">Highest Sharpe Ratio</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Optimized Return</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-value positive" id="bestReturn">+52.24%</span>
+                        <span class="metric-label">30-Day Backtest</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Risk Metrics</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-value" id="sharpeRatio">1.05</span>
+                        <span class="metric-label">Sharpe Ratio</span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Max Drawdown</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-value negative" id="maxDrawdown">-18.6%</span>
+                        <span class="metric-label">Worst Peak-to-Trough</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Strategy Comparison</span>
+                </div>
+                <table class="strategy-table" id="strategyTable">
+                    <thead>
+                        <tr>
+                            <th>Strategy</th>
+                            <th>Return</th>
+                            <th>Sharpe</th>
+                            <th>Win Rate</th>
+                            <th>Max DD</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>MEAN_REVERSION</td>
+                            <td class="positive">+52.24%</td>
+                            <td>1.05</td>
+                            <td>38.5%</td>
+                            <td>18.6%</td>
+                            <td><span class="strategy-badge badge-recommended">Recommended</span></td>
+                        </tr>
+                        <tr>
+                            <td>MOMENTUM</td>
+                            <td class="positive">+10.08%</td>
+                            <td>0.37</td>
+                            <td>70.2%</td>
+                            <td>21.7%</td>
+                            <td><span class="strategy-badge">Active</span></td>
+                        </tr>
+                        <tr>
+                            <td>DIP_BUY</td>
+                            <td class="negative">-7.89%</td>
+                            <td>-0.64</td>
+                            <td>50.0%</td>
+                            <td>10.6%</td>
+                            <td><span class="strategy-badge badge-disabled">Disabled</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Backtest Tab -->
+        <div id="tab-backtest" class="hidden">
+            <div class="controls">
+                <select id="strategySelect">
+                    <option value="MEAN_REVERSION">MEAN_REVERSION</option>
+                    <option value="MOMENTUM">MOMENTUM</option>
+                    <option value="NEAR_CERTAIN">NEAR_CERTAIN</option>
+                    <option value="NEAR_ZERO">NEAR_ZERO</option>
+                    <option value="MID_RANGE">MID_RANGE</option>
+                    <option value="VOLUME_SURGE">VOLUME_SURGE</option>
+                </select>
+                <input type="number" id="daysInput" value="30" min="7" max="365" placeholder="Days">
+                <input type="number" id="marketsInput" value="30" min="10" max="100" placeholder="Markets">
+                <input type="number" id="capitalInput" value="10000" min="100" max="1000000" placeholder="Capital">
+                <button class="btn btn-primary" onclick="runBacktest()">Run Backtest</button>
+            </div>
+
+            <div class="grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Backtest Results</span>
+                    </div>
+                    <div id="backtestResults">
+                        <p class="loading">Select parameters and click "Run Backtest"</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Equity Curve</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="equityChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Monte Carlo Tab -->
+        <div id="tab-montecarlo" class="hidden">
+            <div class="controls">
+                <select id="mcStrategySelect">
+                    <option value="MEAN_REVERSION">MEAN_REVERSION</option>
+                    <option value="MOMENTUM">MOMENTUM</option>
+                </select>
+                <input type="number" id="simulationsInput" value="500" min="100" max="10000" placeholder="Simulations">
+                <button class="btn btn-primary" onclick="runMonteCarlo()">Run Simulation</button>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Monte Carlo Risk Analysis</span>
+                </div>
+                <div id="mcResults">
+                    <p class="loading">Configure and run Monte Carlo simulation</p>
+                </div>
+                <div class="chart-container">
+                    <canvas id="mcChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Config Tab -->
+        <div id="tab-config" class="hidden">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Optimized Configuration</span>
+                </div>
+                <div id="configDisplay">
+                    <div class="loading"><span class="spinner"></span>Loading configuration...</div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            Polymarket Strategy Dashboard | Powered by Sovereign Hive Backtester
+        </footer>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let equityChart = null;
+        let mcChart = null;
+
+        // Tab navigation
+        function showTab(tabName) {
+            document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + tabName).classList.remove('hidden');
+            event.target.classList.add('active');
+        }
+
+        // Check API status
+        async function checkApiStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/health`);
+                if (res.ok) {
+                    document.getElementById('apiStatus').style.background = '#3fb950';
+                    document.getElementById('apiStatusText').textContent = 'Connected';
+                }
+            } catch (e) {
+                document.getElementById('apiStatus').style.background = '#f85149';
+                document.getElementById('apiStatusText').textContent = 'Offline';
+            }
+        }
+
+        // Load strategies
+        async function loadStrategies() {
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/backtest/strategies`);
+                const data = await res.json();
+                console.log('Strategies:', data);
+            } catch (e) {
+                console.error('Failed to load strategies:', e);
+            }
+        }
+
+        // Load optimized config
+        async function loadConfig() {
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/backtest/optimized-config`);
+                const data = await res.json();
+
+                const configHtml = `
+                    <table class="strategy-table">
+                        <tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+                        <tr><td>Max Position %</td><td>15%</td><td>Optimized from 10%</td></tr>
+                        <tr><td>Take Profit</td><td>10%</td><td>Larger wins</td></tr>
+                        <tr><td>Stop Loss</td><td>-5%</td><td>Tighter = better</td></tr>
+                        <tr><td>Kelly Fraction</td><td>0.15</td><td>Conservative</td></tr>
+                        <tr><td>Use Kelly</td><td>Yes</td><td>Position sizing</td></tr>
+                    </table>
+                    <p style="margin-top: 15px; color: var(--text-muted); font-size: 13px;">
+                        Last optimization: ${data.optimization_date || 'Unknown'}
+                    </p>
+                `;
+                document.getElementById('configDisplay').innerHTML = configHtml;
+            } catch (e) {
+                document.getElementById('configDisplay').innerHTML = '<p>Failed to load config</p>';
+            }
+        }
+
+        // Run backtest
+        async function runBacktest() {
+            const strategy = document.getElementById('strategySelect').value;
+            const days = document.getElementById('daysInput').value;
+            const markets = document.getElementById('marketsInput').value;
+            const capital = document.getElementById('capitalInput').value;
+
+            document.getElementById('backtestResults').innerHTML = '<div class="loading"><span class="spinner"></span>Running backtest...</div>';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/backtest/run?strategy=${strategy}&days=${days}&markets=${markets}&capital=${capital}`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+
+                if (data.error) {
+                    throw new Error(data.detail || data.error);
+                }
+
+                const r = data.results;
+                const returnClass = r.total_return_pct >= 0 ? 'positive' : 'negative';
+
+                document.getElementById('backtestResults').innerHTML = `
+                    <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
+                        <div class="metric">
+                            <span class="metric-value ${returnClass}">${r.total_return_pct >= 0 ? '+' : ''}${r.total_return_pct.toFixed(2)}%</span>
+                            <span class="metric-label">Total Return</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value">${r.sharpe_ratio.toFixed(2)}</span>
+                            <span class="metric-label">Sharpe Ratio</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value">${r.win_rate.toFixed(1)}%</span>
+                            <span class="metric-label">Win Rate</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value">${r.total_trades}</span>
+                            <span class="metric-label">Total Trades</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value negative">-${r.max_drawdown_pct.toFixed(1)}%</span>
+                            <span class="metric-label">Max Drawdown</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value">${r.profit_factor.toFixed(2)}</span>
+                            <span class="metric-label">Profit Factor</span>
+                        </div>
+                    </div>
+                `;
+
+                // Update equity chart
+                updateEquityChart(data.equity_curve);
+
+            } catch (e) {
+                document.getElementById('backtestResults').innerHTML = `<p style="color: var(--red);">Error: ${e.message}</p>`;
+            }
+        }
+
+        // Update equity chart
+        function updateEquityChart(equityCurve) {
+            const ctx = document.getElementById('equityChart').getContext('2d');
+
+            if (equityChart) {
+                equityChart.destroy();
+            }
+
+            equityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: equityCurve.map(p => p.timestamp.split('T')[0]),
+                    datasets: [{
+                        label: 'Equity',
+                        data: equityCurve.map(p => p.equity),
+                        borderColor: '#58a6ff',
+                        backgroundColor: 'rgba(88, 166, 255, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            grid: { color: '#30363d' },
+                            ticks: { color: '#8b949e', maxTicksLimit: 6 }
+                        },
+                        y: {
+                            display: true,
+                            grid: { color: '#30363d' },
+                            ticks: {
+                                color: '#8b949e',
+                                callback: v => '$' + v.toLocaleString()
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Run Monte Carlo
+        async function runMonteCarlo() {
+            const strategy = document.getElementById('mcStrategySelect').value;
+            const simulations = document.getElementById('simulationsInput').value;
+
+            document.getElementById('mcResults').innerHTML = '<div class="loading"><span class="spinner"></span>Running Monte Carlo simulation...</div>';
+
+            try {
+                const res = await fetch(`${API_BASE}/api/v1/backtest/monte-carlo/${strategy}?simulations=${simulations}&days=30&markets=30`);
+                const data = await res.json();
+
+                if (data.error) {
+                    throw new Error(data.detail || data.error);
+                }
+
+                const probClass = data.prob_positive >= 0.6 ? 'positive' : data.prob_positive >= 0.4 ? '' : 'negative';
+
+                document.getElementById('mcResults').innerHTML = `
+                    <div class="monte-carlo-stats">
+                        <div class="mc-stat">
+                            <div class="mc-stat-value ${probClass}">${(data.prob_positive * 100).toFixed(0)}%</div>
+                            <div class="mc-stat-label">Probability Profit</div>
+                        </div>
+                        <div class="mc-stat">
+                            <div class="mc-stat-value">${data.mean_return_pct.toFixed(1)}%</div>
+                            <div class="mc-stat-label">Mean Return</div>
+                        </div>
+                        <div class="mc-stat">
+                            <div class="mc-stat-value">${data.median_return_pct.toFixed(1)}%</div>
+                            <div class="mc-stat-label">Median Return</div>
+                        </div>
+                        <div class="mc-stat">
+                            <div class="mc-stat-value negative">${data.var_95.toFixed(1)}%</div>
+                            <div class="mc-stat-label">VaR 95%</div>
+                        </div>
+                        <div class="mc-stat">
+                            <div class="mc-stat-value">${data.ci_95[0].toFixed(1)}% to ${data.ci_95[1].toFixed(1)}%</div>
+                            <div class="mc-stat-label">95% CI</div>
+                        </div>
+                        <div class="mc-stat">
+                            <div class="mc-stat-value">${data.mean_max_drawdown.toFixed(1)}%</div>
+                            <div class="mc-stat-label">Avg Max DD</div>
+                        </div>
+                    </div>
+                `;
+
+                // Update MC histogram
+                updateMCChart(data.return_distribution);
+
+            } catch (e) {
+                document.getElementById('mcResults').innerHTML = `<p style="color: var(--red);">Error: ${e.message}</p>`;
+            }
+        }
+
+        // Update MC histogram
+        function updateMCChart(returns) {
+            const ctx = document.getElementById('mcChart').getContext('2d');
+
+            if (mcChart) {
+                mcChart.destroy();
+            }
+
+            // Create histogram bins
+            const min = Math.min(...returns);
+            const max = Math.max(...returns);
+            const bins = 20;
+            const binWidth = (max - min) / bins;
+            const histogram = new Array(bins).fill(0);
+
+            returns.forEach(r => {
+                const bin = Math.min(bins - 1, Math.floor((r - min) / binWidth));
+                histogram[bin]++;
+            });
+
+            const labels = histogram.map((_, i) => (min + i * binWidth).toFixed(0) + '%');
+            const colors = labels.map((_, i) => {
+                const val = min + i * binWidth;
+                return val < 0 ? 'rgba(248, 81, 73, 0.7)' : 'rgba(63, 185, 80, 0.7)';
+            });
+
+            mcChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Frequency',
+                        data: histogram,
+                        backgroundColor: colors,
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            grid: { display: false },
+                            ticks: { color: '#8b949e', maxTicksLimit: 8 }
+                        },
+                        y: {
+                            display: true,
+                            grid: { color: '#30363d' },
+                            ticks: { color: '#8b949e' }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            checkApiStatus();
+            loadStrategies();
+            loadConfig();
+            setInterval(checkApiStatus, 30000);
+        });
+    </script>
+</body>
+</html>

@@ -28,3 +28,25 @@ To fix this permanently, we moved from **Asyncio Cooperation** to **OS Thread Is
 *   **Outcome:** `Ctrl+C` kills Uvicorn -> OS kills Bot. No zombies. No hanging.
 
 Your code is now architected correctly to handle these two hostile loops (Server vs. HFT) side-by-side.
+
+## Issue: Frontend Connectivity Failure (Localhost:3008)
+
+### Symptoms
+- User reports frontend at `localhost:3008` is not receiving data.
+- `curl http://localhost:8002/health` fails (Connection refused).
+- `curl http://100.50.168.104:8002/health` succeeds (HTTP 200).
+
+### Diagnosis
+1.  **Frontend Location**: The Next.js/React frontend code is **NOT** in this repository (`polymarket-fund`). It is running externally.
+2.  **Configuration Mismatch**: The frontend is likely configured to use the SSH Tunnel (`localhost:8002`), which is currently down.
+3.  **Backend Status**: The Backend is healthy and reachable via "Direct Connection" (`100.50.168.104:8002`).
+
+### Resolution
+User must update their external Frontend's environment variables to bypass the broken tunnel and connect directly.
+
+**Target File**: `.env.local` (in the separate frontend repo)
+**Changes**:
+```env
+NEXT_PUBLIC_API_URL=http://100.50.168.104:8002
+NEXT_PUBLIC_WS_URL=ws://100.50.168.104:8002
+```
