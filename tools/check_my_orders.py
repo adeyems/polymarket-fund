@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv("/app/hft/.env")
 
-PROXY_URL = "REDACTED"
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 
 # Monkey patch requests to use proxy

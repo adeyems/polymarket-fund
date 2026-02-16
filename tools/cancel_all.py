@@ -12,7 +12,7 @@ load_dotenv(".env")
 load_dotenv("/app/hft/.env")
 
 MAKER_ADDRESS = "0xb22028EA4E841CA321eb917C706C931a94b564AB"
-PROXY_URL = "REDACTED"
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 
 session = cffi_requests.Session(impersonate="chrome110", proxies=SYS_PROXIES)

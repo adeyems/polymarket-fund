@@ -1,9 +1,13 @@
 
+import os
 import requests
 import json
+from dotenv import load_dotenv
 
-# Proxy URL from core/config.py
-PROXY_URL = "REDACTED"
+load_dotenv()
+
+# Proxy URL from .env
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 
 def test_proxy():

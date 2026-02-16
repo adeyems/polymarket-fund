@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Config
 HOST = "https://clob.polymarket.com"
 PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY")
-PROXY_URL = "REDACTED"
+PROXY_URL = os.getenv("PROXY_URL", "")
 
 # Kevin Warsh YES token
 TOKEN_ID = "51338236787729560681434534660841415073585974762690814047670810862722808070955"

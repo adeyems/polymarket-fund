@@ -10,7 +10,7 @@ load_dotenv(".env")
 load_dotenv("/app/hft/.env") # Fallback for server path
 
 # ---------------- CONFIGURATION ----------------
-PROXY_URL = "REDACTED"
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 
 # EOA Address (Hardcoded for certainty as per user request)

@@ -24,7 +24,7 @@ if not pk:
     print("[ERROR] POLYMARKET_PRIVATE_KEY is Missing!")
     sys.exit(1)
 
-PROXY_URL = "REDACTED"
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 
 print(f"[TEST] Hooking Proxy: {PROXY_URL}")

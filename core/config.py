@@ -14,8 +14,8 @@ load_dotenv(env_path_local) # Local: config.py in core/, .env in root
 # print(f"DEBUG: TOKEN in ENV: {os.getenv('DISCORD_BOT_TOKEN')}")
 
 # QuesQuant Configuration
-# PROXY: Canada Datacenter (Webshare Montreal) - Bypasses Cloudflare
-PROXY_URL = "REDACTED"
+# PROXY: loaded from .env (PROXY_URL)
+PROXY_URL = os.getenv("PROXY_URL", "")
 
 # Alerts
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")

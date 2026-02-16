@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv("/app/hft/.env")
 
-PROXY_URL = "REDACTED"
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 MAKER_ADDRESS = "0xb22028EA4E841CA321eb917C706C931a94b564AB"
 

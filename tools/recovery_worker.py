@@ -25,7 +25,7 @@ from py_clob_client.exceptions import PolyApiException
 
 # --- CLOUDFLARE BYPASS PATCH (CHAMELEON PROTOCOL V2) ---
 # Hardcoded Proxy to avoid import issues if core not in path
-PROXY_URL = "REDACTED" 
+PROXY_URL = os.getenv("PROXY_URL", "")
 SYS_PROXIES = {"https": PROXY_URL, "http": PROXY_URL}
 
 _cffi_session = cffi_requests.Session(impersonate="chrome110", proxies=SYS_PROXIES)
