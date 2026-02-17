@@ -26,28 +26,28 @@ This prevents context loss across sessions.
 
 ## Current Project Status
 
-**Paper Trading Simulation v5 - ACTIVE** (Started 2026-02-16 15:12 UTC)
-- All 9 strategies running with RESEARCH-BACKED parameters
+**Paper Trading Simulation v6 - ACTIVE** (Started 2026-02-17 ~14:58 UTC)
+- All 9 strategies running with AI market screening
 - Virtual $1000 capital, fresh portfolio reset
-- Process: PID 86122 (caffeinate -i python run_simulation.py)
+- Process: PID 35771 (caffeinate -i python run_simulation.py)
 - Log: `sovereign_hive/logs/simulation.log` (PERMANENT location, NOT /tmp/)
 
-**Research-Backed Parameter Overhaul (2026-02-16 15:12 UTC):**
-1. ✅ Kelly Fraction: 15% → 40% (15% was for $10M+ funds, not $1k)
-2. ✅ Kelly: Removed confidence triple-penalty (was making $10 positions)
-3. ✅ Max Positions: 12 → 6 (concentrate capital)
-4. ✅ Position Cap: $100 → $200 (meaningful trades)
-5. ✅ NEAR_CERTAIN: 95% → 93% (research shows profitable at 93%+)
-6. ✅ DIP_BUY: -5% → -3% threshold, re-enabled
-7. ✅ BINANCE_ARB: 5% → 3% edge (latency arb dead, model-based now)
-8. ✅ MM price range: 15-85% → 5-95% (capturing low-price markets)
-9. ✅ MM target profit: 1% → 2% per trip
-10. ✅ MM bid/ask: added $0.01 floor (fixes rounding on low-price markets)
+**New: AI Market Quality Filter (2026-02-17):**
+- Gemini AI screens every MM market before trading (free tier)
+- Hard 30-day max resolution filter for MM (prevents capital lock-up)
+- Expanded meme market exclusion list ($1M, billion dollar, etc.)
 
-**First Cycle Results (Immediate Improvement!):**
-- 5 positions in first 60 seconds (vs 0 new trades in 42+ hours before)
-- 3 MM + 2 MEAN_REVERSION, $85-200 per position
-- Previous problem: Kelly was sizing at $10-30 → rejected below $50 minimum
+**EC2 Infrastructure (ca-central-1, STOPPED):**
+- Instance: i-08a9ff0a3fc646e5d (16.54.60.150 when running)
+- Wallet: 0x572FA217B5981d5f9F337a5eD5561084C665AD9A ($20 USDC.e + ~79 POL)
+- Status: STOPPED (no charges). Start when ready for live.
+- All CLOB orders cancelled, no open positions.
+
+**Live Trading Test Results (2026-02-17):**
+- Successfully placed real CLOB orders from Montreal EC2
+- Bug found: "CANCELED" (American) vs "CANCELLED" (British) - fixed
+- Bug found: No AI screening = bot picked absurd markets (BTC $1M) - fixed
+- Decision: Return to paper trading until AI filter is proven
 
 **Monitor Simulation:**
 ```bash

@@ -41,9 +41,9 @@ if STRATEGY_FILTER:
 # ============================================================
 
 CONFIG = {
-    "initial_balance": 20.00,        # Real capital (funded wallet)
-    "max_position_pct": 0.40,        # Max 40% per trade ($8 max for $20 portfolio)
-    "max_positions": 3,              # Max 3 positions ($20 portfolio - concentrate capital)
+    "initial_balance": 1000.00,      # Paper trading capital
+    "max_position_pct": 0.20,        # Max 20% per trade
+    "max_positions": 6,              # Diversified positions
     "take_profit_pct": 0.10,         # +10% take profit (optimized: larger wins)
     "stop_loss_pct": -0.05,          # -5% stop loss (optimized: tighter = better)
     # DUAL-SIDE ARB CONFIG
@@ -78,6 +78,8 @@ CONFIG = {
     "mm_target_profit": 0.02,        # 2% target profit per round trip (was 1% - too thin)
     "mm_max_hold_hours": 4,          # Exit if not filled within 4 hours (was 24)
     "mm_price_range": (0.05, 0.95),  # 5-95% range (was 15-85 - missed liquid low-price markets)
+    "mm_max_days_to_resolve": 30,    # Only MM markets resolving within 30 days (fast turnover)
+    "mm_ai_screen": True,            # Use Gemini AI to screen market quality before trading
 
     # BINANCE ARBITRAGE CONFIG (Strategy 8 - Model-based, NOT latency arb)
     # Polymarket added 3.15% dynamic fees on 15-min crypto markets, killing latency arb
@@ -746,73 +748,72 @@ class MarketScanner:
                         "reason": f"DUAL ARB: YES ${yes_price:.3f} + NO ${no_price:.3f} = ${total_cost:.3f} (profit {profit_pct:.1%})"
                     })
 
-            # Strategy 7: MARKET MAKER (NEW - Based on research: 10-200% APY)
+            # Strategy 7: MARKET MAKER (Based on research: 10-200% APY)
             # Place limit orders on both sides, profit from spread when filled
             # Key: High volume markets for reliable fills, reasonable spread
 
-            # QUALITY FILTER: Only skip truly absurd/meme markets (religious, supernatural)
-            q_lower = question.lower()
-            excluded_topics = [
-                "jesus", "christ", "god return", "rapture", "second coming",
-                "alien contact", "extraterrestrial", "supernatural",
-                "flat earth", "illuminati"
-            ]
-            is_meme_market = any(topic in q_lower for topic in excluded_topics)
+            # HARD FILTER: Resolution time (MM needs fast capital turnover)
+            mm_max_days = CONFIG.get("mm_max_days_to_resolve", 30)
+            if days_to_resolve > mm_max_days:
+                pass  # Skip this market for MM — too far out
+            else:
+                # QUALITY FILTER: Skip meme/absurd markets
+                q_lower = question.lower()
+                excluded_topics = [
+                    "jesus", "christ", "god return", "rapture", "second coming",
+                    "alien contact", "extraterrestrial", "supernatural",
+                    "flat earth", "illuminati", "$1m", "$1,000,000",
+                    "million dollars", "billion dollar"
+                ]
+                is_meme_market = any(topic in q_lower for topic in excluded_topics)
 
-            # PREFERRED TOPICS: Finance, Politics, Crypto (boost confidence)
-            preferred_topics = [
-                "bitcoin", "btc", "ethereum", "eth", "crypto", "price",
-                "trump", "biden", "election", "president", "congress",
-                "fed", "interest rate", "inflation", "tariff", "economy"
-            ]
-            is_preferred = any(topic in q_lower for topic in preferred_topics)
+                # PREFERRED TOPICS: Finance, Politics, Crypto (boost confidence)
+                preferred_topics = [
+                    "bitcoin", "btc", "ethereum", "eth", "crypto", "price",
+                    "trump", "biden", "election", "president", "congress",
+                    "fed", "interest rate", "inflation", "tariff", "economy"
+                ]
+                is_preferred = any(topic in q_lower for topic in preferred_topics)
 
-            mm_min, mm_max = CONFIG["mm_price_range"]
-            if (not is_meme_market and  # Skip meme markets
-                mm_min <= best_ask <= mm_max and
-                best_bid > 0 and
-                volume_24h >= CONFIG["mm_min_volume_24h"] and
-                liquidity >= CONFIG["mm_min_liquidity"]):
+                mm_min, mm_max = CONFIG["mm_price_range"]
+                if (not is_meme_market and  # Skip meme markets
+                    mm_min <= best_ask <= mm_max and
+                    best_bid > 0 and
+                    volume_24h >= CONFIG["mm_min_volume_24h"] and
+                    liquidity >= CONFIG["mm_min_liquidity"]):
 
-                spread = best_ask - best_bid
-                spread_pct = spread / ((best_ask + best_bid) / 2) if (best_ask + best_bid) > 0 else 0
-                mid_price = (best_ask + best_bid) / 2
+                    spread = best_ask - best_bid
+                    spread_pct = spread / ((best_ask + best_bid) / 2) if (best_ask + best_bid) > 0 else 0
+                    mid_price = (best_ask + best_bid) / 2
 
-                # Only MM if spread is in our target range (2-8%)
-                if CONFIG["mm_min_spread"] <= spread_pct <= CONFIG["mm_max_spread"]:
-                    # MM profit = half the spread (we improve on best bid/ask)
-                    # We post: bid at mid - 0.5%, ask at mid + 0.5%
-                    # When both fill, profit = 1% (our target)
-                    expected_return = CONFIG["mm_target_profit"]
+                    # Only MM if spread is in our target range (2-8%)
+                    if CONFIG["mm_min_spread"] <= spread_pct <= CONFIG["mm_max_spread"]:
+                        expected_return = CONFIG["mm_target_profit"]
+                        hours_to_fill = 4
+                        days_to_fill = hours_to_fill / 24
+                        annualized = min(self.calculate_annualized_return(expected_return, max(1, int(days_to_fill * 10))), 10.0)
 
-                    # Assume ~4 hour hold time for fills (conservative)
-                    # 1% profit per 4 hours = 2190% annualized (capped)
-                    hours_to_fill = 4
-                    days_to_fill = hours_to_fill / 24
-                    annualized = min(self.calculate_annualized_return(expected_return, max(1, int(days_to_fill * 10))), 10.0)
-
-                    opportunities.append({
-                        "condition_id": condition_id,
-                        "question": question,
-                        "strategy": "MARKET_MAKER",
-                        "side": "MM",  # Special: market making (bid + ask)
-                        "price": mid_price,  # Reference price
-                        "best_bid": best_bid,
-                        "best_ask": best_ask,
-                        "spread": spread,
-                        "spread_pct": spread_pct,
-                        # 2% spread from mid price with $0.01 minimum floor per side
-                        # Without floor: 5¢ market × 2% = $0.001 spread → rounds to $0.00
-                        "mm_bid": round(mid_price - max(mid_price * 0.02, 0.01), 3),
-                        "mm_ask": round(mid_price + max(mid_price * 0.02, 0.01), 3),
-                        "expected_return": expected_return,
-                        "annualized_return": annualized,
-                        "days_to_resolve": 1,  # Fast turnover
-                        "liquidity": liquidity,
-                        "volume_24h": volume_24h,
-                        "confidence": 0.80 if is_preferred else 0.65,  # Boost preferred topics
-                        "reason": f"MM: Spread {spread_pct:.1%}, Vol ${volume_24h/1000:.0f}k, Target {expected_return:.1%}/trip"
-                    })
+                        opportunities.append({
+                            "condition_id": condition_id,
+                            "question": question,
+                            "strategy": "MARKET_MAKER",
+                            "side": "MM",
+                            "price": mid_price,
+                            "best_bid": best_bid,
+                            "best_ask": best_ask,
+                            "spread": spread,
+                            "spread_pct": spread_pct,
+                            "mm_bid": round(mid_price - max(mid_price * 0.02, 0.01), 3),
+                            "mm_ask": round(mid_price + max(mid_price * 0.02, 0.01), 3),
+                            "expected_return": expected_return,
+                            "annualized_return": annualized,
+                            "days_to_resolve": days_to_resolve,
+                            "end_date": end_date_str,
+                            "liquidity": liquidity,
+                            "volume_24h": volume_24h,
+                            "confidence": 0.80 if is_preferred else 0.65,
+                            "reason": f"MM: Spread {spread_pct:.1%}, Vol ${volume_24h/1000:.0f}k, {days_to_resolve}d to resolve"
+                        })
 
             # Strategy 8: BINANCE ARBITRAGE (Crypto price lag arbitrage)
             # Compare Polymarket crypto predictions to Binance spot prices
@@ -1016,6 +1017,16 @@ class TradingEngine:
         self.scanner = MarketScanner()
         self.news = NewsAnalyzer()
         self.running = False
+
+        # AI market screening (Gemini - free tier)
+        if CONFIG.get("mm_ai_screen"):
+            try:
+                from core.gemini_analyzer import GeminiAnalyzer
+                self.gemini = GeminiAnalyzer()
+            except Exception:
+                self.gemini = None
+        else:
+            self.gemini = None
 
         # Live trading components
         if self.live:
@@ -1382,11 +1393,11 @@ class TradingEngine:
         liquidity = opp.get("liquidity", 10000)
         max_liquidity_amount = liquidity * 0.01  # Max 1% of liquidity
 
-        amount = min(max_amount, max_liquidity_amount, 10)  # Cap at $10 per trade ($20 portfolio)
+        amount = min(max_amount, max_liquidity_amount, 200)  # Cap at $200 per trade
 
-        # Minimum position size: $5 (lowered for $20 portfolio live test)
-        if amount < 5:
-            print(f"[TRADE] Skipping: Position too small (${amount:.2f} < $5 minimum)")
+        # Minimum position size
+        if amount < 50:
+            print(f"[TRADE] Skipping: Position too small (${amount:.2f} < $50 minimum)")
             return
 
         # DUAL_SIDE_ARB: Special handling - buy BOTH sides for guaranteed profit
@@ -1547,6 +1558,22 @@ class TradingEngine:
         if mid_price <= 0:
             print(f"[MM] Skipping: Invalid price ${mid_price}")
             return
+
+        # AI MARKET SCREEN: Ask Gemini if this market is worth trading
+        if CONFIG.get("mm_ai_screen") and hasattr(self, 'gemini') and self.gemini:
+            screen = await self.gemini.screen_market(
+                question=opp["question"],
+                price=mid_price,
+                end_date=opp.get("end_date", ""),
+                volume_24h=opp.get("volume_24h", 0),
+            )
+            score = screen.get("quality_score", 5)
+            approved = screen.get("approved", True)
+            if not approved or score < 5:
+                print(f"[MM] AI REJECTED ({score}/10): {opp['question'][:50]}... → {screen.get('reason', '')}")
+                return
+            else:
+                print(f"[MM] AI APPROVED ({score}/10): {opp['question'][:50]}...")
 
         # Split capital: half for bid (buying), half for ask (selling position)
         # But we need to BUY first to have something to sell

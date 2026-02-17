@@ -220,6 +220,66 @@ Rules:
             "neutral_count": neutral
         }
 
+    async def screen_market(self, question: str, price: float, end_date: str, volume_24h: float) -> dict:
+        """
+        AI screen: Is this market worth trading on?
+
+        Returns:
+            {"approved": bool, "reason": str, "quality_score": 0-10}
+        """
+        if not self.api_key:
+            return {"approved": True, "reason": "No API key - skipping screen", "quality_score": 5}
+
+        prompt = f"""You are a prediction market trader screening markets for short-term spread trading (market making).
+You need liquid, active markets where prices move frequently so limit orders get filled quickly.
+
+MARKET: {question}
+CURRENT YES PRICE: ${price:.2f}
+END DATE: {end_date or 'Unknown'}
+24H VOLUME: ${volume_24h:,.0f}
+
+Score this market 1-10 for SHORT-TERM market making (buying low, selling high within hours).
+
+REJECT (score 1-3) if ANY of these apply:
+- The outcome is near-impossible or absurd (e.g., BTC hitting $1M, alien contact)
+- The market won't see meaningful price movement before resolution
+- The market is about a very long-term or speculative event with no near-term catalyst
+- The price is stuck and unlikely to move (dead market despite volume)
+
+APPROVE (score 7-10) if:
+- High-frequency price movement expected (news-driven, political, sports, earnings)
+- Resolution within days or weeks (faster capital turnover)
+- Active trading with real price discovery happening
+
+Respond ONLY with valid JSON:
+{{"approved":true/false,"reason":"one sentence","quality_score":1-10}}"""
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{GEMINI_API_URL}?key={self.api_key}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 100}
+                }
+
+                async with session.post(url, json=payload, timeout=10) as resp:
+                    self._request_count += 1
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if text.startswith("```"):
+                            text = text.split("```")[1]
+                            if text.startswith("json"):
+                                text = text[4:]
+                        result = json.loads(text.strip())
+                        return result
+                    else:
+                        return {"approved": True, "reason": "API error - allowing by default", "quality_score": 5}
+
+        except Exception as e:
+            print(f"[GEMINI] Screen error: {e}")
+            return {"approved": True, "reason": f"Screen error: {e}", "quality_score": 5}
+
     def get_usage_stats(self) -> dict:
         """Get API usage stats."""
         return {
