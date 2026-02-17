@@ -1,11 +1,11 @@
 # =============================================================================
-# QuesQuant HFT - Variables
+# Sovereign Hive - Variables
 # =============================================================================
 
 variable "project_name" {
   description = "Project name for resource tagging"
   type        = string
-  default     = "quesquant"
+  default     = "sovereign-hive"
 }
 
 variable "environment" {
@@ -17,7 +17,7 @@ variable "environment" {
 variable "aws_region" {
   description = "AWS Region"
   type        = string
-  default     = "us-east-1"
+  default     = "ca-central-1"
 }
 
 variable "aws_profile" {
@@ -44,31 +44,25 @@ variable "public_subnet_cidr" {
 variable "availability_zone" {
   description = "Availability Zone"
   type        = string
-  default     = "us-east-1a"
+  default     = "ca-central-1a"
 }
 
 # -----------------------------------------------------------------------------
 # Security
 # -----------------------------------------------------------------------------
 variable "admin_ip_cidr" {
-  description = "Your IP address in CIDR format for SSH access (e.g., 1.2.3.4/32)"
+  description = "Your IP address in CIDR format for SSH access"
   type        = string
   sensitive   = true
-}
-
-variable "dashboard_allowed_cidrs" {
-  description = "CIDR blocks allowed to access Dashboard API"
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
 }
 
 # -----------------------------------------------------------------------------
 # Compute
 # -----------------------------------------------------------------------------
 variable "instance_type" {
-  description = "EC2 instance type (Graviton3 recommended)"
+  description = "EC2 instance type (Graviton3)"
   type        = string
-  default     = "c7g.xlarge"
+  default     = "c7g.medium"
 }
 
 variable "key_name" {
@@ -79,5 +73,5 @@ variable "key_name" {
 variable "root_volume_size" {
   description = "Size of root EBS volume in GB"
   type        = number
-  default     = 30
+  default     = 20
 }

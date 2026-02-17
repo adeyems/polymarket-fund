@@ -1,116 +1,65 @@
 # =============================================================================
-# QuesQuant HFT - IAM Configuration
+# Sovereign Hive - IAM (Secrets Manager + CloudWatch + SSM)
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# IAM Role for EC2 Instance
-# -----------------------------------------------------------------------------
 resource "aws_iam_role" "trading_node" {
-  name = "${var.project_name}-trading-node-role"
+  name = "${var.project_name}-node-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
   })
-
-  tags = {
-    Name = "${var.project_name}-trading-node-role"
-  }
 }
 
-# -----------------------------------------------------------------------------
-# Policy: Read from Secrets Manager
-# -----------------------------------------------------------------------------
-resource "aws_iam_role_policy" "secrets_access" {
-  name = "${var.project_name}-secrets-access"
+resource "aws_iam_instance_profile" "trading_node" {
+  name = "${var.project_name}-node-profile"
+  role = aws_iam_role.trading_node.name
+}
+
+# Read secrets at startup (no .env file on disk)
+resource "aws_iam_role_policy" "secrets_read" {
+  name = "${var.project_name}-secrets-read"
   role = aws_iam_role.trading_node.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret"
-        ]
-        Resource = [
-          "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/*",
-          "arn:aws:secretsmanager:${var.aws_region}:*:secret:prod/polymarket/*"
-        ]
-      }
-    ]
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/*"
+    }]
   })
 }
 
-# -----------------------------------------------------------------------------
-# Policy: Write to CloudWatch Logs
-# -----------------------------------------------------------------------------
-resource "aws_iam_role_policy" "cloudwatch_logs" {
-  name = "${var.project_name}-cloudwatch-logs"
+# Push logs and metrics
+resource "aws_iam_role_policy" "cloudwatch" {
+  name = "${var.project_name}-cloudwatch"
   role = aws_iam_role.trading_node.id
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogStreams"
-        ]
-        Resource = [
-          "arn:aws:logs:${var.aws_region}:*:log-group:${var.project_name}/*",
-          "arn:aws:logs:${var.aws_region}:*:log-group:/${var.project_name}/*"
-        ]
-      }
-    ]
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+        "cloudwatch:PutMetricData"
+      ]
+      Resource = "*"
+    }]
   })
 }
 
-# -----------------------------------------------------------------------------
-# Policy: Write to CloudWatch Metrics
-# -----------------------------------------------------------------------------
-resource "aws_iam_role_policy" "cloudwatch_metrics" {
-  name = "${var.project_name}-cloudwatch-metrics"
-  role = aws_iam_role.trading_node.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "cloudwatch:PutMetricData"
-        ]
-        Resource = ["*"]
-      }
-    ]
-  })
-}
-
-# -----------------------------------------------------------------------------
-# Policy: SSM for Session Manager (Optional but recommended)
-# -----------------------------------------------------------------------------
+# SSM Session Manager (backup access without SSH)
 resource "aws_iam_role_policy_attachment" "ssm_managed" {
   role       = aws_iam_role.trading_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-# -----------------------------------------------------------------------------
-# Instance Profile
-# -----------------------------------------------------------------------------
-resource "aws_iam_instance_profile" "trading_node" {
-  name = "${var.project_name}-trading-node-profile"
-  role = aws_iam_role.trading_node.name
+  # NOTE: Double colon is correct — AWS-managed policies use account-less ARN format
+  # arn:aws:iam::aws:policy/... (no account ID, "aws" is the partition qualifier)
 }

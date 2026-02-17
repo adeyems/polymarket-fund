@@ -23,6 +23,7 @@ __pycache__/
 *.pub
 /tools/deploy_key*
 /infra/live/prod/quesquant-key*
+/infra/live/prod/sovereign-hive-key*
 !/infra/live/prod/quesquant-key-v2.pub
 !/tools/deploy_key_v2.pub
 

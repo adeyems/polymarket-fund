@@ -1,5 +1,5 @@
 # =============================================================================
-# QuesQuant HFT - Provider Configuration
+# Sovereign Hive - Provider Configuration (ca-central-1)
 # =============================================================================
 
 terraform {

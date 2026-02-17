@@ -132,8 +132,10 @@ class KellyCriterion:
         kelly_raw = max(0, min(1, kelly_raw))
 
         # Apply fractional Kelly (reduces volatility)
-        # Also scale by confidence (less confident = smaller bet)
-        kelly_adjusted = kelly_raw * self.kelly_fraction * confidence
+        # NOTE: Confidence is used as a GATE (checked above), NOT as a multiplier.
+        # Previous: kelly_raw * fraction * confidence = triple penalty that made
+        # positions too small for $1k bankrolls (e.g., $10 on 5% edge → rejected)
+        kelly_adjusted = kelly_raw * self.kelly_fraction
 
         # Apply maximum position limit
         kelly_adjusted = min(kelly_adjusted, self.max_position_pct)

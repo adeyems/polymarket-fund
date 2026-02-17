@@ -26,29 +26,28 @@ This prevents context loss across sessions.
 
 ## Current Project Status
 
-**Paper Trading Simulation - ACTIVE** (Started 2026-02-13 10:33 UTC)
-- All 9 strategies running together with 100% realistic parameters
-- Virtual $1000 capital with CORRECTED execution model
-- Process: PID 40862 (caffeinate -i python run_simulation.py)
+**Paper Trading Simulation v5 - ACTIVE** (Started 2026-02-16 15:12 UTC)
+- All 9 strategies running with RESEARCH-BACKED parameters
+- Virtual $1000 capital, fresh portfolio reset
+- Process: PID 86122 (caffeinate -i python run_simulation.py)
 - Log: `sovereign_hive/logs/simulation.log` (PERMANENT location, NOT /tmp/)
 
-**Recent Critical Fixes Applied (2026-02-13 10:35 UTC):**
-1. ✅ MM Spread: 0.5% → 2% (realistic bid/ask spread)
-2. ✅ Fill Rate: 100% → 60% probabilistic (realistic fills)
-3. ✅ Slippage: Added 0.2% average slippage on MM exits
-4. ✅ Kelly Criterion: Disabled for MEAN_REVERSION (was causing capital destruction)
-5. ✅ Min Position Size: $5 → $50 (too small to matter before)
-6. ✅ MM Hold Time: 24h → 4h (realistic market making timeout)
+**Research-Backed Parameter Overhaul (2026-02-16 15:12 UTC):**
+1. ✅ Kelly Fraction: 15% → 40% (15% was for $10M+ funds, not $1k)
+2. ✅ Kelly: Removed confidence triple-penalty (was making $10 positions)
+3. ✅ Max Positions: 12 → 6 (concentrate capital)
+4. ✅ Position Cap: $100 → $200 (meaningful trades)
+5. ✅ NEAR_CERTAIN: 95% → 93% (research shows profitable at 93%+)
+6. ✅ DIP_BUY: -5% → -3% threshold, re-enabled
+7. ✅ BINANCE_ARB: 5% → 3% edge (latency arb dead, model-based now)
+8. ✅ MM price range: 15-85% → 5-95% (capturing low-price markets)
+9. ✅ MM target profit: 1% → 2% per trip
+10. ✅ MM bid/ask: added $0.01 floor (fixes rounding on low-price markets)
 
-**Expected Behavior Changes:**
-```
-BEFORE (Unrealistic)          AFTER (Realistic)
------------------------------------
-MM Win Rate: 99.3% -------> ~70% (realistic)
-MM Returns: +116% --------> +20-30% (realistic)
-MEAN_REVERSION: 0 trades --> executing trades (Kelly disabled)
-Min Position: $5 ---------> $50 (meaningful positions)
-```
+**First Cycle Results (Immediate Improvement!):**
+- 5 positions in first 60 seconds (vs 0 new trades in 42+ hours before)
+- 3 MM + 2 MEAN_REVERSION, $85-200 per position
+- Previous problem: Kelly was sizing at $10-30 → rejected below $50 minimum
 
 **Monitor Simulation:**
 ```bash

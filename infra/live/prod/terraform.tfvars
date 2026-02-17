@@ -1,24 +1,21 @@
 # =============================================================================
-# QuesQuant HFT - Terraform Variable Values
-# =============================================================================
-# IMPORTANT: Update these values before running terraform apply!
+# Sovereign Hive - Variable Values (ca-central-1 Montreal)
 # =============================================================================
 
-project_name = "quesquant"
+project_name = "sovereign-hive"
 environment  = "prod"
-aws_region   = "us-east-1"
+aws_region   = "ca-central-1"
 aws_profile  = "qudus-personal"
 
 # Network
 vpc_cidr           = "10.0.0.0/16"
 public_subnet_cidr = "10.0.1.0/24"
-availability_zone  = "us-east-1a"
+availability_zone  = "ca-central-1a"
 
-# Security - UPDATE THESE!
-admin_ip_cidr           = "81.156.74.152/32"
-dashboard_allowed_cidrs = ["0.0.0.0/0"] # Restrict in production
+# Security — SSH from admin IP only, NO public APIs
+admin_ip_cidr = "81.156.74.152/32"
 
-# Compute
-instance_type    = "c7g.xlarge"
-key_name         = "quesquant-key" # Create this key pair in AWS Console
+# Compute — Graviton3, network-enhanced, lean
+instance_type    = "t4g.small"
+key_name         = "sovereign-hive-key"
 root_volume_size = 30

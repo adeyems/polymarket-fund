@@ -41,9 +41,9 @@ if STRATEGY_FILTER:
 # ============================================================
 
 CONFIG = {
-    "initial_balance": 1000.00,      # Starting virtual balance
-    "max_position_pct": 0.15,        # Max 15% per trade (optimized from backtest)
-    "max_positions": 12,             # Max open positions (was 10, +2 for MM)
+    "initial_balance": 20.00,        # Real capital (funded wallet)
+    "max_position_pct": 0.40,        # Max 40% per trade ($8 max for $20 portfolio)
+    "max_positions": 3,              # Max 3 positions ($20 portfolio - concentrate capital)
     "take_profit_pct": 0.10,         # +10% take profit (optimized: larger wins)
     "stop_loss_pct": -0.05,          # -5% stop loss (optimized: tighter = better)
     # DUAL-SIDE ARB CONFIG
@@ -52,11 +52,11 @@ CONFIG = {
     "min_liquidity": 5000,           # Min market liquidity (lowered from 10k)
     "min_confidence": 0.55,          # Min AI confidence to trade (lowered from 0.60)
     "scan_interval": 60,             # Seconds between scans
-    # Lowered thresholds for more opportunities
-    "dip_threshold": -0.05,          # 5% drop (was 10%)
-    "volume_surge_mult": 2.0,        # 2x volume (was 3x)
-    "near_certain_min": 0.95,        # 95% YES = near-certain YES outcome
-    "near_zero_max": 0.05,           # 5% YES = near-certain NO outcome
+    # Lowered thresholds for more opportunities (research-backed)
+    "dip_threshold": -0.03,          # 3% drop (was 5% - too restrictive)
+    "volume_surge_mult": 1.5,        # 1.5x volume (was 2x - too restrictive)
+    "near_certain_min": 0.93,        # 93% YES (was 95% - research shows 93%+ profitable)
+    "near_zero_max": 0.07,           # 7% YES (was 5% - capture more near-zero opps)
     # CAPITAL EFFICIENCY - The math that matters!
     "max_days_to_resolve": 90,       # Don't lock capital for >90 days
     "min_annualized_return": 0.15,   # Require 15%+ annualized return
@@ -75,24 +75,24 @@ CONFIG = {
     "mm_max_spread": 0.10,           # 10% max spread (relaxed for more opportunities)
     "mm_min_volume_24h": 15000,      # $15k+ volume (lowered - markets are quieter now)
     "mm_min_liquidity": 30000,       # $30k+ liquidity depth
-    "mm_target_profit": 0.01,        # 1% target profit per round trip
+    "mm_target_profit": 0.02,        # 2% target profit per round trip (was 1% - too thin)
     "mm_max_hold_hours": 4,          # Exit if not filled within 4 hours (was 24)
-    "mm_price_range": (0.15, 0.85),  # 15-85% range (penny markets have absurd spreads)
+    "mm_price_range": (0.05, 0.95),  # 5-95% range (was 15-85 - missed liquid low-price markets)
 
-    # BINANCE ARBITRAGE CONFIG (Strategy 8 - Fast turnover on crypto price markets)
-    # Compares Polymarket crypto predictions to Binance spot prices
-    # When Polymarket lags behind real price movement → arbitrage opportunity
-    "binance_min_edge": 0.05,        # 5% minimum edge (Polymarket vs Binance implied)
+    # BINANCE ARBITRAGE CONFIG (Strategy 8 - Model-based, NOT latency arb)
+    # Polymarket added 3.15% dynamic fees on 15-min crypto markets, killing latency arb
+    # Now: compare Binance spot to Polymarket for LONGER-DURATION crypto markets only
+    "binance_min_edge": 0.03,        # 3% minimum edge (was 5% - too restrictive)
     "binance_min_liquidity": 10000,  # $10k minimum liquidity
     "binance_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Cryptos to track
 
     # KELLY CRITERION CONFIG - Optimal position sizing based on edge
-    # Formula: f* = (p*b - q) / b = (estimated_prob - price) / (1 - price)
-    # Using fractional Kelly to reduce volatility while capturing growth
+    # Research: 15% Kelly designed for $10M+ funds. For $1k, need 40% to generate
+    # positions above $50 minimum. Confidence used as GATE only, not multiplier.
     "use_kelly": True,               # Enable Kelly Criterion position sizing
-    "kelly_fraction": 0.15,          # 15% Kelly (optimized: more conservative = better Sharpe)
-    "kelly_min_edge": 0.03,          # Minimum 3% edge to trigger Kelly sizing
-    "kelly_max_position": 0.15,      # Maximum 15% of bankroll per trade
+    "kelly_fraction": 0.40,          # 40% Kelly (was 15% - too conservative for $1k bankroll)
+    "kelly_min_edge": 0.02,          # 2% edge minimum (was 3%)
+    "kelly_max_position": 0.20,      # 20% of bankroll per trade (was 15%)
 
     # MEAN REVERSION CONFIG (OPTIMIZED from backtest: +52% return, 1.05 Sharpe)
     # Backtest date: 2026-02-11, 50 markets, 30-day period
@@ -346,11 +346,23 @@ class MarketScanner:
                 async with session.get(self.GAMMA_API, params=params, timeout=15) as resp:
                     if resp.status == 200:
                         markets = await resp.json()
-                        # Filter for liquidity
-                        return [
-                            m for m in markets
-                            if float(m.get("liquidityNum") or 0) >= CONFIG["min_liquidity"]
-                        ]
+                        # Filter for liquidity and parse token IDs
+                        result = []
+                        for m in markets:
+                            if float(m.get("liquidityNum") or 0) >= CONFIG["min_liquidity"]:
+                                # Parse clobTokenIds for live order placement
+                                raw_ids = m.get("clobTokenIds", "[]")
+                                if isinstance(raw_ids, str):
+                                    try:
+                                        token_ids = json.loads(raw_ids)
+                                    except (json.JSONDecodeError, TypeError):
+                                        token_ids = []
+                                else:
+                                    token_ids = raw_ids or []
+                                m["_token_id_yes"] = token_ids[0] if len(token_ids) > 0 else None
+                                m["_token_id_no"] = token_ids[1] if len(token_ids) > 1 else None
+                                result.append(m)
+                        return result
         except Exception as e:
             print(f"[SCANNER] Error: {e}")
         return []
@@ -489,6 +501,16 @@ class MarketScanner:
         opportunities = []
         binance_prices = binance_prices or self._binance_cache or {}
         now = datetime.now(timezone.utc)
+
+        # Build condition_id → token_id mapping for live order placement
+        token_id_map = {}
+        for m in markets:
+            cid = m.get("conditionId", "")
+            if cid:
+                token_id_map[cid] = {
+                    "token_id_yes": m.get("_token_id_yes"),
+                    "token_id_no": m.get("_token_id_no"),
+                }
 
         for m in markets:
             condition_id = m.get("conditionId", "")
@@ -779,9 +801,10 @@ class MarketScanner:
                         "best_ask": best_ask,
                         "spread": spread,
                         "spread_pct": spread_pct,
-                        # 2% spread from mid price (percentage-based, no dollar floor)
-                        "mm_bid": round(mid_price * 0.98, 3),
-                        "mm_ask": round(mid_price * 1.02, 3),
+                        # 2% spread from mid price with $0.01 minimum floor per side
+                        # Without floor: 5¢ market × 2% = $0.001 spread → rounds to $0.00
+                        "mm_bid": round(mid_price - max(mid_price * 0.02, 0.01), 3),
+                        "mm_ask": round(mid_price + max(mid_price * 0.02, 0.01), 3),
                         "expected_return": expected_return,
                         "annualized_return": annualized,
                         "days_to_resolve": 1,  # Fast turnover
@@ -863,12 +886,14 @@ class MarketScanner:
         # BINANCE_ARB second - fast crypto arbitrage
         # MARKET_MAKER third - spread capture
         diverse_opps = []
-        fast_strats = {"MARKET_MAKER": 4, "BINANCE_ARB": 4}  # Allow more fast-turnover strategies
-        # DIP_BUY disabled - backtest showed consistent losses (-7.89%, -0.64 Sharpe)
+        # Allow more slots for fast-turnover and high-hit-rate strategies
+        fast_strats = {"MARKET_MAKER": 4, "BINANCE_ARB": 3, "NEAR_CERTAIN": 3, "NEAR_ZERO": 3}
 
         # DEBUG: Log opportunities by strategy
         strategy_summary = {}
-        all_strategies = ["DUAL_SIDE_ARB", "BINANCE_ARB", "MARKET_MAKER", "MEAN_REVERSION", "NEAR_CERTAIN", "NEAR_ZERO", "MID_RANGE", "VOLUME_SURGE"]
+        all_strategies = ["DUAL_SIDE_ARB", "MARKET_MAKER", "MEAN_REVERSION",
+                          "NEAR_CERTAIN", "NEAR_ZERO", "MID_RANGE", "VOLUME_SURGE", "DIP_BUY"]
+        # BINANCE_ARB removed: Polymarket's 3.15% dynamic crypto fees killed the edge
 
         # FILTER: If STRATEGY_FILTER env var is set, only use that strategy
         if STRATEGY_FILTER:
@@ -891,6 +916,12 @@ class MarketScanner:
 
         # Final sort by annualized return across all strategies
         result.sort(key=lambda x: x.get("annualized_return", x.get("confidence", 0)), reverse=True)
+
+        # Inject CLOB token IDs for live order placement
+        for opp in result:
+            ids = token_id_map.get(opp["condition_id"], {})
+            opp["token_id_yes"] = ids.get("token_id_yes")
+            opp["token_id_no"] = ids.get("token_id_no")
 
         # Log strategy opportunity summary
         print("\n[OPPS] Strategy Opportunities Found:")
@@ -986,6 +1017,16 @@ class TradingEngine:
         self.news = NewsAnalyzer()
         self.running = False
 
+        # Live trading components
+        if self.live:
+            from core.async_executor import get_executor
+            from core.live_safety import LiveSafety
+            self.executor = get_executor()
+            self.safety = LiveSafety()
+        else:
+            self.executor = None
+            self.safety = None
+
         # Snapshot logger — saves real bid/ask/volume every cycle for future backtesting
         self.snapshot_dir = Path(__file__).parent / "data" / "snapshots"
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -1063,8 +1104,14 @@ class TradingEngine:
         2. Price falls below entry - 3% (STOP LOSS - cut losses)
         3. Hold time exceeds max hours (TIMEOUT - exit at market)
 
-        Simulates realistic MM fill behavior based on price movement.
+        In live mode, uses order state machine (BUY_PENDING → SELL_PENDING → CLOSED).
+        In simulation mode, uses price-based exit logic.
         """
+        # LIVE MODE: Delegate to state machine
+        if self.live:
+            await self._check_mm_exit_live(condition_id, position)
+            return
+
         mm_ask = position.get("mm_ask", position["entry_price"] * 1.01)
         mm_bid = position.get("mm_bid", position["entry_price"])
         entry_time_str = position.get("mm_entry_time", position.get("entry_time", ""))
@@ -1116,6 +1163,166 @@ class TradingEngine:
                 print(f"     P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
             return
 
+    async def _check_mm_exit_live(self, condition_id: str, position: dict):
+        """
+        Live MM order state machine.
+
+        States:
+          BUY_PENDING  → poll buy order → filled? → BUY_FILLED
+          BUY_FILLED   → post sell at mm_ask      → SELL_PENDING
+          SELL_PENDING → poll sell order → filled? → CLOSED (profit)
+                       → price drops 3%?          → cancel sell, exit (stop loss)
+                       → 4h timeout?              → cancel sell, exit (timeout)
+          BUY_PENDING  → 4h timeout?              → cancel buy (no fill)
+        """
+        live_state = position.get("live_state", "")
+        token_id = position.get("token_id", "")
+        mm_ask = position.get("mm_ask", position["entry_price"] * 1.02)
+
+        # Calculate hold time
+        entry_time_str = position.get("mm_entry_time", position.get("entry_time", ""))
+        try:
+            entry_time = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
+            hold_hours = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+        except Exception:
+            hold_hours = 0
+
+        if live_state == "BUY_PENDING":
+            buy_order_id = position.get("buy_order_id", "")
+            if not buy_order_id:
+                return
+
+            status = await self.executor.get_order_status(buy_order_id)
+            matched = status.get("size_matched", 0)
+            original = status.get("original_size", 0)
+
+            if original > 0 and matched >= original * 0.95:
+                # Buy order filled
+                position["live_state"] = "BUY_FILLED"
+                position["actual_fill_price"] = status.get("price", position["entry_price"])
+                self.portfolio._save()
+                print(f"[MM-LIVE] BUY FILLED: {position['question'][:40]}...")
+            elif hold_hours >= CONFIG["mm_max_hold_hours"]:
+                # Timeout - cancel unfilled buy
+                await self.executor.cancel_order(buy_order_id)
+                self.portfolio.balance += position["cost_basis"]
+                del self.portfolio.positions[condition_id]
+                self.portfolio._save()
+                print(f"[MM-LIVE] BUY TIMEOUT: Cancelled unfilled buy after {hold_hours:.1f}h")
+            else:
+                # Still waiting for buy fill
+                if status.get("status") == "CANCELLED":
+                    # Order was cancelled externally
+                    self.portfolio.balance += position["cost_basis"]
+                    del self.portfolio.positions[condition_id]
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] BUY CANCELLED externally")
+
+        elif live_state == "BUY_FILLED":
+            # Post sell order at mm_ask
+            if not token_id:
+                print(f"[MM-LIVE] ERROR: No token_id for sell order")
+                return
+
+            # Track sell retry attempts to avoid infinite loop
+            sell_retries = position.get("sell_retries", 0)
+            if sell_retries >= 5:
+                # Give up on post-only, exit at market to avoid being stuck
+                current_price = await self.scanner.get_market_price(condition_id)
+                if current_price and current_price > 0:
+                    result = self.portfolio.sell(condition_id, current_price, "MM_SELL_FAILED")
+                    if result["success"]:
+                        trade = result["trade"]
+                        if self.live:
+                            self.safety.record_trade_pnl(trade["pnl"])
+                        print(f"[MM-LIVE] SELL FAILED after 5 retries, exiting: ${trade['pnl']:+.2f}")
+                return
+
+            shares = position["shares"]
+            result = await self.executor.post_limit_order(
+                token_id=token_id, side="SELL", price=mm_ask,
+                size=round(shares, 2), post_only=True
+            )
+            sell_order_id = result.get("orderID", "")
+            if sell_order_id:
+                position["sell_order_id"] = sell_order_id
+                position["live_state"] = "SELL_PENDING"
+                position.pop("sell_retries", None)
+                self.portfolio._save()
+                print(f"[MM-LIVE] SELL POSTED @ ${mm_ask:.3f}: {position['question'][:40]}...")
+            else:
+                # Post-only rejected (would cross spread) - retry next cycle
+                position["sell_retries"] = sell_retries + 1
+                self.portfolio._save()
+                print(f"[MM-LIVE] SELL REJECTED (attempt {sell_retries + 1}/5): {result.get('error', 'unknown')}")
+
+        elif live_state == "SELL_PENDING":
+            sell_order_id = position.get("sell_order_id", "")
+            if not sell_order_id:
+                return
+
+            status = await self.executor.get_order_status(sell_order_id)
+            matched = status.get("size_matched", 0)
+            original = status.get("original_size", 0)
+
+            if original > 0 and matched >= original * 0.95:
+                # Sell order filled - PROFIT!
+                result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED")
+                if result["success"]:
+                    trade = result["trade"]
+                    self.safety.record_trade_pnl(trade["pnl"])
+                    print(f"[MM-LIVE] FILLED! P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
+                return
+
+            # Check stop-loss and timeout while waiting for sell fill
+            current_price = await self.scanner.get_market_price(condition_id)
+            if current_price is None:
+                return
+
+            pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
+
+            if pnl_pct <= -0.03:
+                # STOP LOSS: Cancel sell, exit at best bid
+                await self.executor.cancel_order(sell_order_id)
+                # Place aggressive sell at best bid
+                book = await self.executor.get_order_book(token_id)
+                bids = book.get("bids", [])
+                exit_price = bids[0][0] if bids else current_price * 0.99
+                await self.executor.post_limit_order(
+                    token_id=token_id, side="SELL",
+                    price=exit_price, size=round(position["shares"], 2),
+                    post_only=False  # Allow taker to exit fast
+                )
+                result = self.portfolio.sell(condition_id, exit_price, "MM_STOP")
+                if result["success"]:
+                    trade = result["trade"]
+                    self.safety.record_trade_pnl(trade["pnl"])
+                    print(f"[MM-LIVE] STOP LOSS @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
+
+            elif hold_hours >= CONFIG["mm_max_hold_hours"]:
+                # TIMEOUT: Cancel sell, exit at best bid
+                await self.executor.cancel_order(sell_order_id)
+                book = await self.executor.get_order_book(token_id)
+                bids = book.get("bids", [])
+                exit_price = bids[0][0] if bids else current_price * 0.99
+                await self.executor.post_limit_order(
+                    token_id=token_id, side="SELL",
+                    price=exit_price, size=round(position["shares"], 2),
+                    post_only=False
+                )
+                result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT")
+                if result["success"]:
+                    trade = result["trade"]
+                    self.safety.record_trade_pnl(trade["pnl"])
+                    print(f"[MM-LIVE] TIMEOUT @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
+
+            elif status.get("status") == "CANCELLED":
+                # Sell order cancelled externally - re-enter BUY_FILLED to repost
+                position["live_state"] = "BUY_FILLED"
+                position["sell_order_id"] = ""
+                self.portfolio._save()
+                print(f"[MM-LIVE] SELL CANCELLED externally, will repost next cycle")
+
     async def evaluate_opportunity(self, opp: dict) -> bool:
         """Evaluate if we should trade an opportunity."""
         condition_id = opp["condition_id"]
@@ -1150,8 +1357,8 @@ class TradingEngine:
     async def execute_trade(self, opp: dict):
         """Execute a trade for an opportunity using REAL market prices."""
         # Calculate position size using Kelly Criterion if enabled
-        # MEAN_REVERSION disabled from Kelly (too conservative for moderate edges)
-        if CONFIG.get("use_kelly", False) and opp["strategy"] not in ["DUAL_SIDE_ARB", "MARKET_MAKER", "MEAN_REVERSION"]:
+        # These strategies use fixed % sizing (Kelly undersizes them due to moderate edges)
+        if CONFIG.get("use_kelly", False) and opp["strategy"] not in ["DUAL_SIDE_ARB", "MARKET_MAKER", "MEAN_REVERSION", "MID_RANGE"]:
             kelly = KellyCriterion(
                 kelly_fraction=CONFIG.get("kelly_fraction", 0.25),
                 max_position_pct=CONFIG.get("kelly_max_position", 0.15),
@@ -1175,12 +1382,11 @@ class TradingEngine:
         liquidity = opp.get("liquidity", 10000)
         max_liquidity_amount = liquidity * 0.01  # Max 1% of liquidity
 
-        amount = min(max_amount, max_liquidity_amount, 100)  # Cap at $100 per trade
+        amount = min(max_amount, max_liquidity_amount, 10)  # Cap at $10 per trade ($20 portfolio)
 
-        # Minimum position size: $50 (was $5, too small for meaningful returns)
-        # At $5 × 1% profit = $0.05 per trade (not meaningful)
-        if amount < 50:
-            print(f"[TRADE] Skipping: Position too small (${amount:.2f} < $50 minimum)")
+        # Minimum position size: $5 (lowered for $20 portfolio live test)
+        if amount < 5:
+            print(f"[TRADE] Skipping: Position too small (${amount:.2f} < $5 minimum)")
             return
 
         # DUAL_SIDE_ARB: Special handling - buy BOTH sides for guaranteed profit
@@ -1204,10 +1410,52 @@ class TradingEngine:
             return
 
         if self.live:
-            # LIVE: Would execute real order here
-            print(f"[TRADE] LIVE MODE: Would buy ${amount:.2f} of {opp['side']}")
-            print(f"        Market: {opp['question'][:50]}...")
-            # TODO: Implement real CLOB order execution
+            # LIVE: Place real CLOB order for non-MM strategies
+            token_id = opp.get("token_id_yes") if opp["side"] == "YES" else opp.get("token_id_no")
+            if not token_id:
+                print(f"[TRADE-LIVE] SKIP: No token_id for {opp['strategy']}")
+                return
+
+            total_exposure = sum(p["cost_basis"] for p in self.portfolio.positions.values())
+            safe, reason = self.safety.pre_order_check(
+                order_amount=amount,
+                portfolio_balance=self.portfolio.balance,
+                total_exposure=total_exposure,
+                portfolio_initial=self.portfolio.initial_balance,
+            )
+            if not safe:
+                print(f"[TRADE-LIVE] SAFETY BLOCK: {reason}")
+                return
+
+            await self.executor.init()
+            shares = amount / opp["price"]
+            result = await self.executor.post_limit_order(
+                token_id=token_id, side="BUY", price=opp["price"],
+                size=round(shares, 2), post_only=True
+            )
+            order_id = result.get("orderID", "")
+            if not order_id:
+                print(f"[TRADE-LIVE] ORDER FAILED: {result.get('error', result)}")
+                return
+
+            # Record in portfolio
+            port_result = self.portfolio.buy(
+                condition_id=opp["condition_id"],
+                question=opp["question"],
+                side=opp["side"],
+                price=opp["price"],
+                amount=amount,
+                reason=opp["reason"],
+                strategy=opp["strategy"]
+            )
+            if port_result["success"]:
+                pos = self.portfolio.positions[opp["condition_id"]]
+                pos["buy_order_id"] = order_id
+                pos["token_id"] = token_id
+                pos["live_state"] = "BUY_PENDING"
+                self.portfolio._save()
+                print(f"[TRADE-LIVE] BUY ${amount:.2f} {opp['side']} @ {opp['price']:.3f}")
+                print(f"             {opp['strategy']} | {opp['question'][:50]}...")
             return
         else:
             # SIMULATION: Record virtual trade
@@ -1306,9 +1554,61 @@ class TradingEngine:
         buy_amount = amount
 
         if self.live:
-            print(f"[MM] LIVE MODE: Would post limit orders")
-            print(f"     BID: ${mm_bid:.3f} | ASK: ${mm_ask:.3f}")
-            print(f"     Spread: {spread_pct:.1%} | Amount: ${buy_amount:.2f}")
+            # LIVE: Place real CLOB order
+            token_id = opp.get("token_id_yes")
+            if not token_id:
+                print(f"[MM-LIVE] SKIP: No token_id for {opp['question'][:40]}")
+                return
+
+            # Safety checks
+            total_exposure = sum(p["cost_basis"] for p in self.portfolio.positions.values())
+            safe, reason = self.safety.pre_order_check(
+                order_amount=buy_amount,
+                portfolio_balance=self.portfolio.balance,
+                total_exposure=total_exposure,
+                portfolio_initial=self.portfolio.initial_balance,
+            )
+            if not safe:
+                print(f"[MM-LIVE] SAFETY BLOCK: {reason}")
+                return
+
+            # Post BUY limit order at mm_bid (post-only = maker, zero fees)
+            await self.executor.init()
+            shares = buy_amount / mm_bid
+            result = await self.executor.post_limit_order(
+                token_id=token_id, side="BUY", price=mm_bid,
+                size=round(shares, 2), post_only=True
+            )
+
+            order_id = result.get("orderID", "")
+            if not order_id:
+                print(f"[MM-LIVE] BUY ORDER FAILED: {result.get('error', result)}")
+                return
+
+            print(f"[MM-LIVE] BUY POSTED @ ${mm_bid:.3f} ({round(shares, 2)} shares)")
+            print(f"          Market: {opp['question'][:50]}...")
+
+            # Record in portfolio with order tracking
+            port_result = self.portfolio.buy(
+                condition_id=opp["condition_id"],
+                question=opp["question"],
+                side="MM",
+                price=mm_bid,
+                amount=buy_amount,
+                reason=opp["reason"],
+                strategy="MARKET_MAKER"
+            )
+            if port_result["success"]:
+                pos = self.portfolio.positions[opp["condition_id"]]
+                pos["mm_bid"] = mm_bid
+                pos["mm_ask"] = mm_ask
+                pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                pos["mm_target_profit"] = CONFIG["mm_target_profit"]
+                pos["buy_order_id"] = order_id
+                pos["sell_order_id"] = ""
+                pos["token_id"] = token_id
+                pos["live_state"] = "BUY_PENDING"
+                self.portfolio._save()
             return
 
         # SIMULATION: Record as MM position with special tracking
@@ -1467,11 +1767,25 @@ class TradingEngine:
 
         if self.live:
             print("\n*** LIVE TRADING - REAL MONEY AT RISK ***\n")
+            # Initialize CLOB client at startup
+            await self.executor.init()
+            if not self.executor.client:
+                print("[FATAL] Cannot initialize CLOB client. Aborting live mode.")
+                return
+            # Register signal handlers for graceful shutdown
+            import signal
+            loop = asyncio.get_event_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda: setattr(self, 'running', False))
 
         self.running = True
 
         try:
             while self.running:
+                # Check kill switch in live mode
+                if self.live and self.safety.check_kill_switch():
+                    print("[SHUTDOWN] Kill switch detected!")
+                    break
                 await self.run_cycle()
                 print(f"\n[SLEEP] Next scan in {CONFIG['scan_interval']} seconds...")
                 await asyncio.sleep(CONFIG["scan_interval"])
@@ -1479,6 +1793,12 @@ class TradingEngine:
             print("\n[SHUTDOWN] Stopping gracefully...")
         finally:
             self.running = False
+
+            # Cancel all open orders in live mode
+            if self.live and self.executor and self.executor._initialized:
+                print("[SHUTDOWN] Cancelling all open CLOB orders...")
+                await self.executor.cancel_all_orders()
+
             summary = self.portfolio.get_summary()
             print(f"\n{'='*60}")
             print(f"  FINAL SUMMARY")

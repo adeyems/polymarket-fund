@@ -1,12 +1,13 @@
 # =============================================================================
-# QuesQuant HFT - Main Configuration
+# Sovereign Hive - Main Configuration (ca-central-1, lean)
+# =============================================================================
+# Public subnet, no NAT Gateway, locked-down security group.
+# Cost: ~$12/month (t4g.small) + ~$4 (EIP + CloudWatch) = ~$16/month
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Data Sources
+# AMI
 # -----------------------------------------------------------------------------
-
-# Get latest Amazon Linux 2023 ARM64 AMI
 data "aws_ami" "amazon_linux_arm" {
   most_recent = true
   owners      = ["amazon"]
@@ -15,12 +16,10 @@ data "aws_ami" "amazon_linux_arm" {
     name   = "name"
     values = ["al2023-ami-*-arm64"]
   }
-
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
   }
-
   filter {
     name   = "architecture"
     values = ["arm64"]
@@ -28,38 +27,87 @@ data "aws_ami" "amazon_linux_arm" {
 }
 
 # -----------------------------------------------------------------------------
-# Modules
+# VPC (minimal — 1 public subnet, no NAT)
 # -----------------------------------------------------------------------------
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
-module "vpc" {
-  source = "../../modules/vpc"
-
-  project_name       = var.project_name
-  environment        = var.environment
-  vpc_cidr           = var.vpc_cidr
-  public_subnet_cidr = var.public_subnet_cidr
-  availability_zone  = var.availability_zone
+  tags = { Name = "${var.project_name}-vpc" }
 }
 
-module "security" {
-  source = "../../modules/security"
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags   = { Name = "${var.project_name}-igw" }
+}
 
-  project_name            = var.project_name
-  environment             = var.environment
-  vpc_id                  = module.vpc.vpc_id
-  admin_ip_cidr           = var.admin_ip_cidr
-  dashboard_allowed_cidrs = var.dashboard_allowed_cidrs
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidr
+  availability_zone       = var.availability_zone
+  map_public_ip_on_launch = true
+
+  tags = { Name = "${var.project_name}-public" }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = { Name = "${var.project_name}-public-rt" }
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
 }
 
 # -----------------------------------------------------------------------------
-# EC2 Instance (Graviton3 Trading Node)
+# Security Group — ZERO inbound except SSH from admin IP
+# -----------------------------------------------------------------------------
+resource "aws_security_group" "trading_node" {
+  name_prefix = "${var.project_name}-node-"
+  description = "Trading node: SSH from admin only, all outbound"
+  vpc_id      = aws_vpc.main.id
+
+  # SSH from admin IP only
+  ingress {
+    description = "SSH from admin"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.admin_ip_cidr]
+  }
+
+  # All outbound (CLOB API, Polygon RPC, package repos)
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project_name}-sg" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# -----------------------------------------------------------------------------
+# EC2 Instance
 # -----------------------------------------------------------------------------
 resource "aws_instance" "trading_node" {
   ami                    = data.aws_ami.amazon_linux_arm.id
   instance_type          = var.instance_type
   key_name               = var.key_name
-  subnet_id              = module.vpc.public_subnet_id
-  vpc_security_group_ids = module.security.security_group_ids
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.trading_node.id]
   iam_instance_profile   = aws_iam_instance_profile.trading_node.name
 
   root_block_device {
@@ -69,32 +117,19 @@ resource "aws_instance" "trading_node" {
     delete_on_termination = true
   }
 
-  # Enable detailed monitoring for HFT
   monitoring = true
 
-  # User data script for initial setup (uses external script)
-  user_data = filebase64("${path.module}/../../../tools/user_data.sh")
+  user_data = filebase64("${path.module}/../../../tools/user_data_v2.sh")
 
   tags = {
-    Name        = "${var.project_name}-trading-node"
-    Environment = var.environment
-    Role        = "hft-trading"
-  }
-
-  lifecycle {
-    # Prevent accidental termination
-    prevent_destroy = false # Set to true for production
+    Name = "${var.project_name}-trading-node"
   }
 }
 
-# -----------------------------------------------------------------------------
-# Elastic IP (Static Public IP)
-# -----------------------------------------------------------------------------
+# Elastic IP
 resource "aws_eip" "trading_node" {
   instance = aws_instance.trading_node.id
   domain   = "vpc"
 
-  tags = {
-    Name = "${var.project_name}-trading-node-eip"
-  }
+  tags = { Name = "${var.project_name}-eip" }
 }

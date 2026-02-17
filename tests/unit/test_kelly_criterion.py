@@ -175,8 +175,13 @@ class TestFractionalKelly:
 class TestConfidenceScaling:
     """Tests for confidence-based scaling."""
 
-    def test_low_confidence_reduces_position(self, calculator):
-        """Test that low confidence reduces position."""
+    def test_confidence_is_gate_not_multiplier(self, calculator):
+        """Test that confidence acts as a gate, not a multiplier.
+
+        Above the min_confidence threshold, confidence does NOT scale
+        position size — it only gates entry. This prevents triple-penalty
+        (Kelly * fraction * confidence) that made positions too small.
+        """
         high_conf = calculator.calculate(
             estimated_prob=0.75,
             market_price=0.60,
@@ -193,7 +198,8 @@ class TestConfidenceScaling:
             side="YES"
         )
 
-        assert low_conf.position_size < high_conf.position_size
+        # Both above threshold → same position size (confidence is a gate)
+        assert low_conf.position_size == high_conf.position_size
 
     def test_confidence_below_threshold_returns_none(self, calculator):
         """Test that confidence below threshold returns None."""

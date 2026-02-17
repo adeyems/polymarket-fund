@@ -1,77 +1,91 @@
 #!/bin/bash
 # =============================================================================
-# QuesQuant HFT - Upload Secrets to AWS Secrets Manager
+# Sovereign Hive - Upload Secrets to AWS Secrets Manager (ca-central-1)
 # =============================================================================
-# This script uploads your local .env file to AWS Secrets Manager.
-# The EC2 instance will fetch these secrets at boot time.
+# Reads local .env → uploads to Secrets Manager.
+# Run from project root: bash tools/upload_secrets.sh
 # =============================================================================
 
 set -euo pipefail
 
-AWS_PROFILE="qudus-personal"
-AWS_REGION="us-east-1"
+REGION="ca-central-1"
+PROFILE="qudus-personal"
+SECRET_ID="sovereign-hive/env"
+
+echo "=== Sovereign Hive - Upload Secrets ==="
+echo "Region: $REGION | Secret: $SECRET_ID"
+
 ENV_FILE=".env"
-SECRET_NAME="quesquant/env"
-
-echo "================================================"
-echo "QuesQuant - Upload Secrets to AWS"
-echo "================================================"
-
-# Check if .env exists
 if [ ! -f "$ENV_FILE" ]; then
-    echo "❌ Error: $ENV_FILE not found"
-    echo "   Create a .env file with your secrets first."
+    echo "ERROR: .env not found in current directory"
     exit 1
 fi
 
-echo "Profile: $AWS_PROFILE"
-echo "Region:  $AWS_REGION"
-echo "Secret:  $SECRET_NAME"
-echo "Source:  $ENV_FILE"
-echo ""
-
-# Convert .env to JSON
+# Convert .env to JSON using Python (handles = signs in values correctly)
 echo "[1/2] Converting .env to JSON..."
-ENV_JSON=$(cat "$ENV_FILE" | grep -v '^#' | grep -v '^$' | \
-    awk -F '=' '{
-        key=$1;
-        $1="";
-        val=substr($0,2);
-        gsub(/"/, "\\\"", val);
-        printf "\"%s\": \"%s\",\n", key, val
-    }' | sed '$ s/,$//' | awk 'BEGIN{print "{"} {print} END{print "}"}')
+ENV_JSON=$(python3 -c "
+import json, sys
+result = {}
+with open('$ENV_FILE') as f:
+    for line in f:
+        line = line.strip()
+        if not line or line.startswith('#') or 'REGENERATE' in line:
+            continue
+        key, _, value = line.partition('=')
+        if key and value:
+            result[key] = value
+print(json.dumps(result))
+")
 
-echo "  ✓ JSON created"
+echo "  Keys: $(echo "$ENV_JSON" | jq -r 'keys[]' 2>/dev/null | tr '\n' ' ' || echo '(install jq to see)')"
 
-# Check if secret exists
+# Create or update secret
 echo "[2/2] Uploading to Secrets Manager..."
-if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" \
-    --profile "$AWS_PROFILE" --region "$AWS_REGION" 2>/dev/null; then
-    # Update existing secret
+if aws secretsmanager describe-secret --secret-id "$SECRET_ID" \
+    --profile "$PROFILE" --region "$REGION" 2>/dev/null; then
     aws secretsmanager put-secret-value \
-        --secret-id "$SECRET_NAME" \
+        --secret-id "$SECRET_ID" \
         --secret-string "$ENV_JSON" \
-        --profile "$AWS_PROFILE" \
-        --region "$AWS_REGION"
-    echo "  ✓ Secret updated"
+        --profile "$PROFILE" \
+        --region "$REGION"
+    echo "  Secret updated"
 else
-    # Create new secret
     aws secretsmanager create-secret \
-        --name "$SECRET_NAME" \
-        --description "QuesQuant HFT environment variables" \
+        --name "$SECRET_ID" \
+        --description "Sovereign Hive environment variables" \
         --secret-string "$ENV_JSON" \
-        --profile "$AWS_PROFILE" \
-        --region "$AWS_REGION"
-    echo "  ✓ Secret created"
+        --profile "$PROFILE" \
+        --region "$REGION"
+    echo "  Secret created"
+fi
+
+# Deploy key (optional)
+DEPLOY_KEY_FILE="$HOME/.ssh/sovereign-hive-deploy"
+DEPLOY_SECRET_ID="sovereign-hive/deploy-key"
+if [ -f "$DEPLOY_KEY_FILE" ]; then
+    echo ""
+    echo "Uploading deploy key..."
+    ENCODED_KEY=$(base64 < "$DEPLOY_KEY_FILE")
+    DEPLOY_JSON="{\"private_key\":\"$ENCODED_KEY\"}"
+
+    if aws secretsmanager describe-secret --secret-id "$DEPLOY_SECRET_ID" \
+        --profile "$PROFILE" --region "$REGION" 2>/dev/null; then
+        aws secretsmanager put-secret-value \
+            --secret-id "$DEPLOY_SECRET_ID" \
+            --secret-string "$DEPLOY_JSON" \
+            --profile "$PROFILE" \
+            --region "$REGION"
+    else
+        aws secretsmanager create-secret \
+            --name "$DEPLOY_SECRET_ID" \
+            --description "GitHub deploy key for sovereign-hive repo" \
+            --secret-string "$DEPLOY_JSON" \
+            --profile "$PROFILE" \
+            --region "$REGION"
+    fi
+    echo "  Deploy key uploaded"
 fi
 
 echo ""
-echo "================================================"
-echo "✅ Secrets uploaded successfully!"
-echo "================================================"
-echo ""
-echo "To verify:"
-echo "  aws secretsmanager get-secret-value --secret-id $SECRET_NAME --profile $AWS_PROFILE --region $AWS_REGION"
-echo ""
-echo "Keys uploaded:"
-echo "$ENV_JSON" | jq -r 'keys[]' 2>/dev/null || echo "(install jq to see keys)"
+echo "=== Upload Complete ==="
+echo "Verify: aws secretsmanager get-secret-value --secret-id $SECRET_ID --region $REGION --profile $PROFILE --query SecretString --output text | jq keys"

@@ -1,80 +1,21 @@
 # =============================================================================
-# QuesQuant HFT - CloudWatch Dashboard
+# Sovereign Hive - CloudWatch (Logs + Heartbeat Alarm)
 # =============================================================================
 
-resource "aws_cloudwatch_dashboard" "hft" {
-  dashboard_name = "${var.project_name}-hft-dashboard"
-
-  dashboard_body = file("${path.module}/../../cloudwatch/dashboard.json")
-}
-
-# -----------------------------------------------------------------------------
-# CloudWatch Log Groups
-# -----------------------------------------------------------------------------
-resource "aws_cloudwatch_log_group" "hft_bot" {
-  name              = "/quesquant/hft-bot"
+resource "aws_cloudwatch_log_group" "trading" {
+  name              = "/${var.project_name}/trading"
   retention_in_days = 30
-
-  tags = {
-    Name        = "${var.project_name}-hft-bot-logs"
-    Environment = var.environment
-  }
 }
 
-resource "aws_cloudwatch_log_group" "trades" {
-  name              = "/quesquant/trades"
-  retention_in_days = 365
-
-  tags = {
-    Name        = "${var.project_name}-trades-logs"
-    Environment = var.environment
-  }
-}
-
-# -----------------------------------------------------------------------------
-# CloudWatch Alarms
-# -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "heartbeat_missing" {
   alarm_name          = "${var.project_name}-heartbeat-missing"
+  alarm_description   = "No heartbeat from trading bot in 10 minutes"
   comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 3
+  evaluation_periods  = 2
   metric_name         = "Heartbeat"
-  namespace           = "QuesQuant/HFT"
-  period              = 60
+  namespace           = var.project_name
+  period              = 300
   statistic           = "Sum"
   threshold           = 1
-  alarm_description   = "HFT Bot heartbeat missing - possible crash"
   treat_missing_data  = "breaching"
-
-  dimensions = {
-    Environment = var.environment
-  }
-
-  # TODO: Add SNS topic for alerts
-  # alarm_actions = [aws_sns_topic.alerts.arn]
-
-  tags = {
-    Name = "${var.project_name}-heartbeat-alarm"
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "high_latency" {
-  alarm_name          = "${var.project_name}-high-latency"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "TickToTradeLatency"
-  namespace           = "QuesQuant/HFT"
-  period              = 60
-  statistic           = "Average"
-  threshold           = 300
-  alarm_description   = "Tick-to-trade latency exceeds 300ms"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    Environment = var.environment
-  }
-
-  tags = {
-    Name = "${var.project_name}-latency-alarm"
-  }
 }
