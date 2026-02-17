@@ -1211,7 +1211,7 @@ class TradingEngine:
                 print(f"[MM-LIVE] BUY TIMEOUT: Cancelled unfilled buy after {hold_hours:.1f}h")
             else:
                 # Still waiting for buy fill
-                if status.get("status") == "CANCELLED":
+                if status.get("status") in ("CANCELLED", "CANCELED"):
                     # Order was cancelled externally
                     self.portfolio.balance += position["cost_basis"]
                     del self.portfolio.positions[condition_id]
@@ -1316,7 +1316,7 @@ class TradingEngine:
                     self.safety.record_trade_pnl(trade["pnl"])
                     print(f"[MM-LIVE] TIMEOUT @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
 
-            elif status.get("status") == "CANCELLED":
+            elif status.get("status") in ("CANCELLED", "CANCELED"):
                 # Sell order cancelled externally - re-enter BUY_FILLED to repost
                 position["live_state"] = "BUY_FILLED"
                 position["sell_order_id"] = ""
