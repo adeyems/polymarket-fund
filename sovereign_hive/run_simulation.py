@@ -14,6 +14,7 @@ import aiohttp
 import argparse
 import json
 import os
+import random
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
@@ -22,7 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.claude_analyzer import ClaudeAnalyzer
-from core.kelly_criterion import KellyCriterion
+from core.kelly_criterion import KellyCriterion, monte_carlo_validate, empirical_probability, polymarket_taker_fee, taker_slippage
+from core.news_intelligence import NewsIntelligence
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,7 +45,7 @@ if STRATEGY_FILTER:
 CONFIG = {
     "initial_balance": 1000.00,      # Paper trading capital
     "max_position_pct": 0.20,        # Max 20% per trade
-    "max_positions": 6,              # Diversified positions
+    "max_positions": 10,             # More positions for active trading
     "take_profit_pct": 0.10,         # +10% take profit (optimized: larger wins)
     "stop_loss_pct": -0.05,          # -5% stop loss (optimized: tighter = better)
     # DUAL-SIDE ARB CONFIG
@@ -51,7 +53,8 @@ CONFIG = {
     "dual_side_min_liquidity": 10000, # $10k minimum liquidity per side
     "min_liquidity": 5000,           # Min market liquidity (lowered from 10k)
     "min_confidence": 0.55,          # Min AI confidence to trade (lowered from 0.60)
-    "scan_interval": 60,             # Seconds between scans
+    "scan_interval": 120,            # Scan every 2 min (was 10 min — too slow)
+    "exit_check_interval": 30,       # Check exits every 30s for faster turnover
     # Lowered thresholds for more opportunities (research-backed)
     "dip_threshold": -0.03,          # 3% drop (was 5% - too restrictive)
     "volume_surge_mult": 1.5,        # 1.5x volume (was 2x - too restrictive)
@@ -68,18 +71,30 @@ CONFIG = {
     "mid_range_max": 0.80,           # 80% - room to move down
     "min_24h_volume": 10000,         # Volume threshold for mid-range (lowered)
 
-    # MARKET MAKER CONFIG (NEW - Based on research: 10-200% APY proven)
-    # Strategy: Post bid/ask on both sides, profit from spread when both fill
-    # Source: Polymarket docs + on-chain analysis of profitable MM bots
-    "mm_min_spread": 0.02,           # 2% minimum spread to profit after fees
-    "mm_max_spread": 0.10,           # 10% max spread (relaxed for more opportunities)
-    "mm_min_volume_24h": 15000,      # $15k+ volume (lowered - markets are quieter now)
-    "mm_min_liquidity": 30000,       # $30k+ liquidity depth
-    "mm_target_profit": 0.02,        # 2% target profit per round trip (was 1% - too thin)
-    "mm_max_hold_hours": 4,          # Exit if not filled within 4 hours (was 24)
-    "mm_price_range": (0.05, 0.95),  # 5-95% range (was 15-85 - missed liquid low-price markets)
-    "mm_max_days_to_resolve": 30,    # Only MM markets resolving within 30 days (fast turnover)
-    "mm_ai_screen": True,            # Use Gemini AI to screen market quality before trading
+    # MARKET MAKER CONFIG (DATA-DRIVEN from 88.5M on-chain trade analysis)
+    # Source: becker-dataset analysis of $12B across 30,649 resolved markets
+    "mm_min_spread": 0.01,           # 1% min spread
+    "mm_max_spread": 0.15,           # 15% max spread
+    "mm_min_volume_24h": 5000,       # $5k+ volume
+    "mm_min_liquidity": 10000,       # $10k+ liquidity
+    "mm_target_profit": 0.015,       # 1.5% default (AI overrides per-market)
+    "mm_max_hold_hours": 2,          # Exit after 2h
+    "mm_price_range": (0.50, 0.70),  # SWEET SPOT: Kelly +29-48%, ROI +23-26% (was 0.05-0.95)
+    "mm_fallback_range": (0.80, 0.95),  # SECONDARY: Kelly +4-20%, smaller edge
+    "mm_max_days_to_resolve": 30,    # 15-30d optimal, 30d cap works
+    "mm_min_days_to_resolve": 2,     # 0-1d is NEGATIVE edge (insider-dominated)
+    "mm_ai_screen": True,            # Use Gemini AI to screen market quality
+    "mm_fill_probability": 0.60,     # 60% chance of fill when price touches ask (sim only)
+    "mm_slippage_bps": 20,           # 20 bps (0.2%) slippage on entry/exit prices (sim only)
+
+    # NEG_RISK ARBITRAGE CONFIG (multi-outcome event arbitrage)
+    # Source: 42% of NegRisk events have probability sums != 1.0
+    # Top arbitrageur extracted $2M+ across 4,049 trades
+    "negrisk_min_edge": 0.005,       # 0.5% minimum guaranteed profit
+    "negrisk_min_outcomes": 3,       # Need 3+ outcomes for meaningful arb
+    "negrisk_min_liquidity": 5000,   # $5k min liquidity per outcome
+    "negrisk_max_outcomes": 50,      # Skip events with 50+ outcomes (execution risk)
+    "negrisk_max_edge": 0.10,        # 10% max edge — higher means NOT mutually exclusive
 
     # BINANCE ARBITRAGE CONFIG (Strategy 8 - Model-based, NOT latency arb)
     # Polymarket added 3.15% dynamic fees on 15-min crypto markets, killing latency arb
@@ -88,13 +103,15 @@ CONFIG = {
     "binance_min_liquidity": 10000,  # $10k minimum liquidity
     "binance_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Cryptos to track
 
-    # KELLY CRITERION CONFIG - Optimal position sizing based on edge
-    # Research: 15% Kelly designed for $10M+ funds. For $1k, need 40% to generate
-    # positions above $50 minimum. Confidence used as GATE only, not multiplier.
+    # KELLY CRITERION CONFIG - Monte Carlo Cap 3 Half Kelly (institutional standard)
+    # Source: Article analysis + 88.5M trade Becker dataset empirical edges
+    # Half Kelly = f*/2: 75% of growth, 25% of volatility
+    # Cap 3 = 30% max position per trade (hard ceiling)
+    # Monte Carlo = 10,000 simulated paths validate fraction at startup
     "use_kelly": True,               # Enable Kelly Criterion position sizing
-    "kelly_fraction": 0.40,          # 40% Kelly (was 15% - too conservative for $1k bankroll)
-    "kelly_min_edge": 0.02,          # 2% edge minimum (was 3%)
-    "kelly_max_position": 0.20,      # 20% of bankroll per trade (was 15%)
+    "kelly_fraction": 0.50,          # Half Kelly (was 0.40 — now institutional standard)
+    "kelly_min_edge": 0.02,          # 2% edge minimum
+    "kelly_max_position": 0.30,      # Cap 3: 30% of bankroll per trade (was 20%)
 
     # MEAN REVERSION CONFIG (OPTIMIZED from backtest: +52% return, 1.05 Sharpe)
     # Backtest date: 2026-02-11, 50 markets, 30-day period
@@ -102,7 +119,17 @@ CONFIG = {
     "mean_reversion_high": 0.70,     # Buy NO when price > 70%
     "mean_reversion_tp": 0.10,       # 10% take profit (optimized)
     "mean_reversion_sl": -0.05,      # 5% stop loss (tighter = better)
+
+    # WEBSOCKET CONFIG — real-time price feed (replaces REST polling for exits)
+    "use_websocket": False,          # Opt-in: True for live, False for sim (saves connections)
+    "ws_stale_seconds": 30,          # Consider WS price stale after 30s, fall back to REST
 }
+
+# Maker strategies pay ZERO fees (post-only limit orders)
+MAKER_STRATEGIES = {"MARKET_MAKER"}
+
+# Exit reasons that are fee-free (on-chain settlement, not CLOB trades)
+FEE_FREE_EXITS = {"RESOLVED", "MM_RESOLVED", "MM_DELISTED", "MM_FILLED"}
 
 # ============================================================
 # PORTFOLIO STATE
@@ -115,34 +142,55 @@ class Portfolio:
         self.data_file = Path(__file__).parent / "data" / data_file
         self.data_file.parent.mkdir(exist_ok=True)
 
-        # Load or initialize
+        # Load or initialize (with corruption recovery)
         if self.data_file.exists():
-            self._load()
+            try:
+                self._load()
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                # Corrupted JSON — try .tmp backup, else start fresh
+                tmp_file = self.data_file.with_suffix(".json.tmp")
+                if tmp_file.exists():
+                    try:
+                        print(f"[PORTFOLIO] WARNING: {self.data_file.name} corrupted ({e}), recovering from .tmp backup")
+                        import shutil
+                        shutil.copy2(tmp_file, self.data_file)
+                        self._load()
+                    except Exception:
+                        print(f"[PORTFOLIO] WARNING: Backup also corrupted, starting fresh")
+                        self._init_fresh(initial_balance)
+                        return
+                else:
+                    print(f"[PORTFOLIO] WARNING: {self.data_file.name} corrupted ({e}), starting fresh")
+                    self._init_fresh(initial_balance)
+                    return
         else:
-            self.balance = initial_balance
-            self.initial_balance = initial_balance
-            self.positions: Dict[str, dict] = {}
-            self.trade_history: List[dict] = []
-            self.metrics = {
-                "total_trades": 0,
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "total_pnl": 0.0,
-                "max_drawdown": 0.0,
-                "peak_balance": initial_balance,
-            }
-            # Strategy-level tracking for A/B testing
-            self.strategy_metrics = {
-                "NEAR_CERTAIN": {"trades": 0, "wins": 0, "pnl": 0.0},
-                "NEAR_ZERO": {"trades": 0, "wins": 0, "pnl": 0.0},
-                "DIP_BUY": {"trades": 0, "wins": 0, "pnl": 0.0},
-                "VOLUME_SURGE": {"trades": 0, "wins": 0, "pnl": 0.0},
-                "MID_RANGE": {"trades": 0, "wins": 0, "pnl": 0.0},
-                "DUAL_SIDE_ARB": {"trades": 0, "wins": 0, "pnl": 0.0},  # Account88888 strategy
-                "MARKET_MAKER": {"trades": 0, "wins": 0, "pnl": 0.0},  # Spread capture strategy
-                "BINANCE_ARB": {"trades": 0, "wins": 0, "pnl": 0.0},   # Crypto price arbitrage
-            }
-            self._save()
+            self._init_fresh(initial_balance)
+
+    def _init_fresh(self, initial_balance: float = 1000.0):
+        """Initialize a fresh portfolio (used on first run or corruption recovery)."""
+        self.balance = initial_balance
+        self.initial_balance = initial_balance
+        self.positions: Dict[str, dict] = {}
+        self.trade_history: List[dict] = []
+        self.metrics = {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "total_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "peak_balance": initial_balance,
+        }
+        self.strategy_metrics = {
+            "NEAR_CERTAIN": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "NEAR_ZERO": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "DIP_BUY": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "VOLUME_SURGE": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "MID_RANGE": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "DUAL_SIDE_ARB": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "MARKET_MAKER": {"trades": 0, "wins": 0, "pnl": 0.0},
+            "BINANCE_ARB": {"trades": 0, "wins": 0, "pnl": 0.0},
+        }
+        self._save()
 
     def _load(self):
         with open(self.data_file, "r") as f:
@@ -151,7 +199,18 @@ class Portfolio:
         self.initial_balance = data["initial_balance"]
         self.positions = data["positions"]
         self.trade_history = data["trade_history"]
-        self.metrics = data["metrics"]
+        # Merge loaded metrics with defaults to handle missing keys
+        # Start with saved data, fill in any missing keys with defaults
+        default_metrics = {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "total_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "peak_balance": data.get("initial_balance", 1000.0),
+        }
+        saved_metrics = data.get("metrics", {})
+        self.metrics = {**default_metrics, **saved_metrics}
         self.strategy_metrics = data.get("strategy_metrics", {
             "NEAR_CERTAIN": {"trades": 0, "wins": 0, "pnl": 0.0},
             "NEAR_ZERO": {"trades": 0, "wins": 0, "pnl": 0.0},
@@ -184,15 +243,28 @@ class Portfolio:
             "strategy_metrics": self.strategy_metrics,
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
-        with open(self.data_file, "w") as f:
-            json.dump(data, f, indent=2)
+        try:
+            # Atomic write: write to .tmp then rename (prevents corruption on crash/kill)
+            tmp_file = self.data_file.with_suffix(".json.tmp")
+            with open(tmp_file, "w") as f:
+                json.dump(data, f, indent=2)
+            tmp_file.replace(self.data_file)  # Atomic on POSIX
+        except Exception as e:
+            print(f"[PORTFOLIO] WARNING: Save failed ({e}), trading continues with in-memory state")
 
-    def buy(self, condition_id: str, question: str, side: str, price: float, amount: float, reason: str, strategy: str = "UNKNOWN") -> dict:
-        """Execute a simulated buy order."""
+    def buy(self, condition_id: str, question: str, side: str, price: float, amount: float, reason: str, strategy: str = "UNKNOWN", fee_pct: float = 0.0) -> dict:
+        """Execute a simulated buy order.
+
+        Args:
+            fee_pct: Taker fee as decimal (e.g. 0.0144 for 1.44%). Makers pass 0.
+                     Fee is deducted from the amount, reducing shares received.
+        """
         if amount > self.balance:
             return {"success": False, "error": "Insufficient balance"}
 
-        shares = amount / price
+        fee = amount * fee_pct
+        effective_amount = amount - fee
+        shares = effective_amount / price
 
         position = {
             "condition_id": condition_id,
@@ -200,26 +272,38 @@ class Portfolio:
             "side": side,
             "entry_price": price,
             "shares": shares,
-            "cost_basis": amount,
+            "cost_basis": amount,  # Full amount paid (includes fee)
+            "entry_fee": round(fee, 4),
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
-            "strategy": strategy,  # Track which strategy opened this position
+            "strategy": strategy,
         }
 
         self.positions[condition_id] = position
         self.balance -= amount
 
+        # Track cumulative fees per strategy
+        if strategy in self.strategy_metrics:
+            self.strategy_metrics[strategy].setdefault("fees", 0.0)
+            self.strategy_metrics[strategy]["fees"] += fee
+
         self._save()
 
         return {"success": True, "position": position}
 
-    def sell(self, condition_id: str, current_price: float, reason: str) -> dict:
-        """Execute a simulated sell order."""
+    def sell(self, condition_id: str, current_price: float, reason: str, fee_pct: float = 0.0) -> dict:
+        """Execute a simulated sell order.
+
+        Args:
+            fee_pct: Taker fee as decimal. Makers pass 0. Fee deducted from proceeds.
+        """
         if condition_id not in self.positions:
             return {"success": False, "error": "Position not found"}
 
         position = self.positions[condition_id]
-        proceeds = position["shares"] * current_price
+        gross_proceeds = position["shares"] * current_price
+        exit_fee = gross_proceeds * fee_pct
+        proceeds = gross_proceeds - exit_fee
         pnl = proceeds - position["cost_basis"]
         pnl_pct = pnl / position["cost_basis"] * 100
         strategy = position.get("strategy", "UNKNOWN")
@@ -234,6 +318,8 @@ class Portfolio:
             "shares": position["shares"],
             "pnl": round(pnl, 2),
             "pnl_pct": round(pnl_pct, 2),
+            "entry_fee": position.get("entry_fee", 0),
+            "exit_fee": round(exit_fee, 4),
             "entry_time": position["entry_time"],
             "exit_time": datetime.now(timezone.utc).isoformat(),
             "exit_reason": reason,
@@ -248,6 +334,8 @@ class Portfolio:
             self.strategy_metrics[strategy]["pnl"] += pnl
             if pnl > 0:
                 self.strategy_metrics[strategy]["wins"] += 1
+            self.strategy_metrics[strategy].setdefault("fees", 0.0)
+            self.strategy_metrics[strategy]["fees"] += exit_fee
         self.balance += proceeds
 
         # Update metrics
@@ -305,20 +393,22 @@ class Portfolio:
             "total_trades": self.metrics["total_trades"],
             "win_rate": round(win_rate, 1),
             "total_pnl": round(self.metrics["total_pnl"], 2),
-            "max_drawdown_pct": round(self.metrics["max_drawdown"] * 100, 2),
+            "max_drawdown_pct": round(self.metrics.get("max_drawdown", 0) * 100, 2),
             "strategy_metrics": self.strategy_metrics,
         }
 
     def get_strategy_report(self) -> str:
         """Get A/B test report for all strategies."""
         lines = ["STRATEGY PERFORMANCE (A/B Test):"]
-        lines.append("-" * 50)
+        lines.append("-" * 65)
         for strategy, metrics in self.strategy_metrics.items():
             trades = metrics["trades"]
             wins = metrics["wins"]
             pnl = metrics["pnl"]
+            fees = metrics.get("fees", 0.0)
             win_rate = (wins / trades * 100) if trades > 0 else 0
-            lines.append(f"  {strategy:15} | Trades: {trades:3} | Win: {win_rate:5.1f}% | P&L: ${pnl:+.2f}")
+            fee_str = f" | Fees: ${fees:.2f}" if fees > 0 else ""
+            lines.append(f"  {strategy:15} | Trades: {trades:3} | Win: {win_rate:5.1f}% | P&L: ${pnl:+.2f}{fee_str}")
         return "\n".join(lines)
 
 
@@ -334,56 +424,114 @@ class MarketScanner:
 
     def __init__(self):
         self._binance_cache = {}  # Cache for Binance prices
+        self._retry_max = 3
+        self._retry_base_delay = 1.0  # seconds
         # MEAN_REVERSION cooldown tracking — prevents death loop on same market
         self.mr_cooldowns = {}  # {condition_id: last_exit_timestamp}
         self.mr_entry_counts = {}  # {condition_id: number_of_entries}
         self.MR_COOLDOWN_HOURS = 48
         self.MR_MAX_ENTRIES = 2
 
+    async def _fetch_with_retry(self, url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
+        """Fetch URL with 3-retry exponential backoff. Returns parsed JSON or None."""
+        for attempt in range(self._retry_max):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, params=params, timeout=timeout) as resp:
+                        if resp.status == 200:
+                            return await resp.json()
+                        elif resp.status in (429, 502, 503):
+                            delay = self._retry_base_delay * (2 ** attempt)
+                            print(f"[SCANNER] HTTP {resp.status} from {url.split('/')[-1]}, retry {attempt+1}/{self._retry_max} in {delay:.0f}s")
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            return None  # Non-retryable HTTP error
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                delay = self._retry_base_delay * (2 ** attempt)
+                if attempt < self._retry_max - 1:
+                    print(f"[SCANNER] {type(e).__name__} on {url.split('/')[-1]}, retry {attempt+1}/{self._retry_max} in {delay:.0f}s")
+                    await asyncio.sleep(delay)
+                else:
+                    print(f"[SCANNER] {type(e).__name__} on {url.split('/')[-1]}, all {self._retry_max} attempts failed")
+            except Exception as e:
+                print(f"[SCANNER] Unexpected error: {e}")
+                return None
+        return None
+
     async def get_active_markets(self) -> List[dict]:
-        """Fetch active markets with good liquidity."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                params = {"limit": 100, "active": "true", "closed": "false"}
-                async with session.get(self.GAMMA_API, params=params, timeout=15) as resp:
-                    if resp.status == 200:
-                        markets = await resp.json()
-                        # Filter for liquidity and parse token IDs
-                        result = []
-                        for m in markets:
-                            if float(m.get("liquidityNum") or 0) >= CONFIG["min_liquidity"]:
-                                # Parse clobTokenIds for live order placement
-                                raw_ids = m.get("clobTokenIds", "[]")
-                                if isinstance(raw_ids, str):
-                                    try:
-                                        token_ids = json.loads(raw_ids)
-                                    except (json.JSONDecodeError, TypeError):
-                                        token_ids = []
-                                else:
-                                    token_ids = raw_ids or []
-                                m["_token_id_yes"] = token_ids[0] if len(token_ids) > 0 else None
-                                m["_token_id_no"] = token_ids[1] if len(token_ids) > 1 else None
-                                result.append(m)
-                        return result
-        except Exception as e:
-            print(f"[SCANNER] Error: {e}")
-        return []
+        """Fetch active markets with good liquidity (with retry)."""
+        params = {"limit": 200, "active": "true", "closed": "false", "order": "volume24hr", "ascending": "false"}
+        markets = await self._fetch_with_retry(self.GAMMA_API, params=params, timeout=15)
+        if not markets:
+            return []
+        result = []
+        for m in markets:
+            if float(m.get("liquidityNum") or 0) >= CONFIG["min_liquidity"]:
+                raw_ids = m.get("clobTokenIds", "[]")
+                if isinstance(raw_ids, str):
+                    try:
+                        token_ids = json.loads(raw_ids)
+                    except (json.JSONDecodeError, TypeError):
+                        token_ids = []
+                else:
+                    token_ids = raw_ids or []
+                m["_token_id_yes"] = token_ids[0] if len(token_ids) > 0 else None
+                m["_token_id_no"] = token_ids[1] if len(token_ids) > 1 else None
+                result.append(m)
+        return result
 
     async def get_market_price(self, condition_id: str) -> Optional[float]:
-        """Get current YES price for a market."""
-        try:
-            # Fetch all active markets and find the one with matching conditionId
-            # (The API doesn't properly filter by conditionId parameter)
-            async with aiohttp.ClientSession() as session:
-                params = {"limit": 200, "active": "true", "closed": "false"}
-                async with session.get(self.GAMMA_API, params=params, timeout=15) as resp:
-                    if resp.status == 200:
-                        markets = await resp.json()
-                        for m in markets:
-                            if m.get("conditionId") == condition_id:
-                                return float(m.get("bestAsk") or 0)
-        except Exception as e:
-            print(f"[SCANNER] Price fetch error: {e}")
+        """Get current YES price for a market (with retry).
+
+        Sorts by volume24hr to ensure high-volume (actively held) positions
+        are reliably found. Returns None (not 0) when market not found,
+        to avoid false stop-loss triggers.
+        """
+        params = {
+            "limit": 500,
+            "active": "true",
+            "closed": "false",
+            "order": "volume24hr",
+            "ascending": "false",
+        }
+        markets = await self._fetch_with_retry(self.GAMMA_API, params=params, timeout=20)
+        if not markets:
+            return None
+        for m in markets:
+            if m.get("conditionId") == condition_id:
+                best_ask = m.get("bestAsk")
+                if best_ask is not None:
+                    return float(best_ask)
+                return None  # Market found but no ask price
+        return None
+
+    async def get_resolution_price(self, condition_id: str) -> Optional[float]:
+        """
+        Get the YES resolution price for a closed/resolved market (with retry).
+
+        Returns:
+          1.0  if YES won
+          0.0  if NO won (YES worthless)
+          None if market not found in closed markets (still active or API error)
+
+        Uses outcomePrices field: ["1","0"] = YES won, ["0","1"] = NO won.
+        """
+        params = {"conditionId": condition_id, "closed": "true", "limit": 5}
+        markets = await self._fetch_with_retry(self.GAMMA_API, params=params, timeout=15)
+        if not markets:
+            return None
+        for m in markets:
+            if m.get("conditionId") != condition_id:
+                continue
+            outcome_prices = m.get("outcomePrices")
+            if not outcome_prices:
+                continue
+            if isinstance(outcome_prices, str):
+                import json as _json
+                outcome_prices = _json.loads(outcome_prices)
+            yes_resolved = float(outcome_prices[0])
+            return yes_resolved  # 1.0 = YES won, 0.0 = NO won
         return None
 
     def calculate_annualized_return(self, raw_return: float, days: int) -> float:
@@ -410,20 +558,15 @@ class MarketScanner:
             return 0.0
 
     async def get_binance_prices(self) -> Dict[str, float]:
-        """Fetch current Binance spot prices for major cryptos."""
+        """Fetch current Binance spot prices for major cryptos (with retry)."""
         symbols = CONFIG.get("binance_symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
         prices = {}
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.BINANCE_API, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        for item in data:
-                            if item["symbol"] in symbols:
-                                prices[item["symbol"]] = float(item["price"])
-        except Exception as e:
-            print(f"[BINANCE] Price fetch error: {e}")
+        data = await self._fetch_with_retry(self.BINANCE_API, timeout=10)
+        if data:
+            for item in data:
+                if item["symbol"] in symbols:
+                    prices[item["symbol"]] = float(item["price"])
 
         self._binance_cache = prices
         return prices
@@ -585,7 +728,9 @@ class MarketScanner:
 
             # Strategy 3: Dip buying (price dropped >5%)
             # Active trading - assume 7-day hold for TP/SL
-            if price_change < CONFIG["dip_threshold"] and volume_24h > 30000:
+            # PRICE FILTER: Only buy dips in empirically profitable zones
+            dip_in_edge_zone = (0.55 <= best_ask <= 0.65) or (0.80 <= best_ask <= 0.95)
+            if price_change < CONFIG["dip_threshold"] and volume_24h > 30000 and dip_in_edge_zone:
                 expected_return = abs(price_change)
                 annualized = self.calculate_annualized_return(expected_return, 7)  # 7-day target
                 opportunities.append({
@@ -604,9 +749,21 @@ class MarketScanner:
 
             # Strategy 4: Volume surge (smart money)
             # Active trading - assume 7-day hold for TP/SL
-            hourly_avg = volume_24h / 24 if volume_24h > 0 else 0
-            volume_1h = float(m.get("volume1hr") or hourly_avg)
-            if hourly_avg > 0 and volume_1h > hourly_avg * CONFIG["volume_surge_mult"] and abs(price_change) < 0.05:
+            # Gamma API has no hourly volume field. Use oneHourPriceChange as
+            # a proxy: large price moves require large volume to execute.
+            # Combine with high absolute daily volume as a quality filter.
+            # PRICE FILTER (from 88.5M Becker trades): Only trade in empirically
+            # profitable zones. Death zone (0.35-0.45) and trap zone (0.70-0.75) blocked.
+            price_change_1h = abs(float(m.get("oneHourPriceChange") or 0))
+            min_hourly_change = 0.02  # 2% move signals unusual activity
+            min_surge_volume = 30000  # $30k daily volume floor
+            surge_price = best_ask if price_change >= 0 else (1.0 - best_bid if best_bid > 0 else 1.0 - best_ask)
+            surge_in_edge_zone = (0.55 <= surge_price <= 0.65) or (0.80 <= surge_price <= 0.95)
+            if (price_change_1h >= min_hourly_change
+                    and volume_24h >= min_surge_volume
+                    and abs(price_change) < 0.05
+                    and surge_in_edge_zone):
+                surge_ratio = price_change_1h / min_hourly_change  # how many multiples of 2%
                 expected_return = 0.10
                 annualized = self.calculate_annualized_return(expected_return, 7)  # 7-day target
                 opportunities.append({
@@ -614,51 +771,56 @@ class MarketScanner:
                     "question": question,
                     "strategy": "VOLUME_SURGE",
                     "side": "YES" if price_change >= 0 else "NO",
-                    "price": best_ask if price_change >= 0 else best_bid,
+                    "price": best_ask if price_change >= 0 else (1.0 - best_bid if best_bid > 0 else 1.0 - best_ask),
                     "expected_return": expected_return,
                     "annualized_return": annualized,
                     "days_to_resolve": 7,  # Active trading target
                     "liquidity": liquidity,
                     "confidence": 0.60,
-                    "reason": f"Volume {volume_1h/hourly_avg:.1f}x, {annualized:.0%} APY target"
+                    "reason": f"1h surge {price_change_1h:.1%} ({surge_ratio:.1f}x), {annualized:.0%} APY target"
                 })
 
             # Strategy 5: Mid-range active trading
             # Fastest capital turnover - 5% TP in ~3-7 days
-            if (CONFIG["mid_range_min"] <= best_ask <= CONFIG["mid_range_max"] and
-                volume_24h >= CONFIG["min_24h_volume"]):
+            # PRICE FILTER (from 88.5M Becker trades): Only trade in empirically
+            # profitable zones. Death zone (0.35-0.45) and trap zone (0.70-0.75) blocked.
+            if volume_24h >= CONFIG["min_24h_volume"]:
                 expected_return = CONFIG["take_profit_pct"]  # 5% take profit
                 annualized = self.calculate_annualized_return(expected_return, 5)  # 5-day target
                 # Trade with momentum: buy YES if price going up, NO if going down
                 if price_change > 0.005:  # 0.5%+ upward momentum
-                    opportunities.append({
-                        "condition_id": condition_id,
-                        "question": question,
-                        "strategy": "MID_RANGE",
-                        "side": "YES",
-                        "price": best_ask,
-                        "expected_return": expected_return,
-                        "annualized_return": annualized,
-                        "days_to_resolve": 5,  # Fast active trading
-                        "liquidity": liquidity,
-                        "confidence": 0.55,
-                        "reason": f"MID UP {price_change:+.1%}, {annualized:.0%} APY target"
-                    })
+                    yes_in_edge_zone = (0.55 <= best_ask <= 0.65) or (0.80 <= best_ask <= 0.95)
+                    if yes_in_edge_zone:
+                        opportunities.append({
+                            "condition_id": condition_id,
+                            "question": question,
+                            "strategy": "MID_RANGE",
+                            "side": "YES",
+                            "price": best_ask,
+                            "expected_return": expected_return,
+                            "annualized_return": annualized,
+                            "days_to_resolve": 5,  # Fast active trading
+                            "liquidity": liquidity,
+                            "confidence": 0.55,
+                            "reason": f"MID UP {price_change:+.1%}, {annualized:.0%} APY target"
+                        })
                 elif price_change < -0.005:  # 0.5%+ downward momentum
                     no_price = 1.0 - best_bid if best_bid > 0 else 1.0 - best_ask
-                    opportunities.append({
-                        "condition_id": condition_id,
-                        "question": question,
-                        "strategy": "MID_RANGE",
-                        "side": "NO",
-                        "price": no_price,
-                        "expected_return": expected_return,
-                        "annualized_return": annualized,
-                        "days_to_resolve": 5,  # Fast active trading
-                        "liquidity": liquidity,
-                        "confidence": 0.55,
-                        "reason": f"MID DOWN {price_change:+.1%}, {annualized:.0%} APY target"
-                    })
+                    no_in_edge_zone = (0.55 <= no_price <= 0.65) or (0.80 <= no_price <= 0.95)
+                    if no_in_edge_zone:
+                        opportunities.append({
+                            "condition_id": condition_id,
+                            "question": question,
+                            "strategy": "MID_RANGE",
+                            "side": "NO",
+                            "price": no_price,
+                            "expected_return": expected_return,
+                            "annualized_return": annualized,
+                            "days_to_resolve": 5,  # Fast active trading
+                            "liquidity": liquidity,
+                            "confidence": 0.55,
+                            "reason": f"MID DOWN {price_change:+.1%}, {annualized:.0%} APY target"
+                        })
 
             # Strategy 5.5: MEAN_REVERSION (OPTIMIZED - Best performing in backtest!)
             # Buys YES when price < 30% (expects reversion toward 50%)
@@ -752,10 +914,12 @@ class MarketScanner:
             # Place limit orders on both sides, profit from spread when filled
             # Key: High volume markets for reliable fills, reasonable spread
 
-            # HARD FILTER: Resolution time (MM needs fast capital turnover)
+            # HARD FILTER: Resolution time (data-driven from 88.5M trade analysis)
+            # 15-30d is optimal (Kelly +5.51%), 0-1d is NEGATIVE (insider-dominated)
             mm_max_days = CONFIG.get("mm_max_days_to_resolve", 30)
-            if days_to_resolve > mm_max_days:
-                pass  # Skip this market for MM — too far out
+            mm_min_days = CONFIG.get("mm_min_days_to_resolve", 2)
+            if days_to_resolve > mm_max_days or days_to_resolve < mm_min_days:
+                pass  # Skip — outside optimal resolution window
             else:
                 # QUALITY FILTER: Skip meme/absurd markets
                 q_lower = question.lower()
@@ -767,32 +931,62 @@ class MarketScanner:
                 ]
                 is_meme_market = any(topic in q_lower for topic in excluded_topics)
 
-                # PREFERRED TOPICS: Finance, Politics, Crypto (boost confidence)
+                # PREFERRED TOPICS: Politics & Economics (data-driven: Kelly +4-5%)
+                # Crypto REMOVED — negative Kelly (-1.53%) from 88.5M trade analysis
                 preferred_topics = [
-                    "bitcoin", "btc", "ethereum", "eth", "crypto", "price",
                     "trump", "biden", "election", "president", "congress",
-                    "fed", "interest rate", "inflation", "tariff", "economy"
+                    "fed", "interest rate", "inflation", "tariff", "economy",
+                    "gdp", "unemployment", "recession", "jobs",
                 ]
                 is_preferred = any(topic in q_lower for topic in preferred_topics)
 
+                # NEGATIVE CATEGORIES: Crypto has negative edge
+                negative_categories = ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana"]
+                is_negative_category = any(kw in q_lower for kw in negative_categories)
+
+                # TWO-ZONE PRICE FILTER (data-driven from 88.5M trades)
+                # Sweet spot: 0.50-0.70 (Kelly +29-48%, ROI +23-26%)
+                # Fallback: 0.80-0.95 (Kelly +4-20%, smaller edge)
+                # Death zone: 0.35-0.45 (Kelly -17 to -22%) — EXCLUDED
+                # Trap zone: 0.70-0.75 (Kelly -19%) — EXCLUDED
                 mm_min, mm_max = CONFIG["mm_price_range"]
-                if (not is_meme_market and  # Skip meme markets
-                    mm_min <= best_ask <= mm_max and
-                    best_bid > 0 and
-                    volume_24h >= CONFIG["mm_min_volume_24h"] and
-                    liquidity >= CONFIG["mm_min_liquidity"]):
+                fb_min, fb_max = CONFIG.get("mm_fallback_range", (0.80, 0.95))
+                in_sweet_spot = mm_min <= best_ask <= mm_max
+                in_fallback = fb_min <= best_ask <= fb_max
+                mm_pass_price = in_sweet_spot or in_fallback
+
+                mm_pass_bid = best_bid > 0
+                mm_pass_vol = volume_24h >= CONFIG["mm_min_volume_24h"]
+                mm_pass_liq = liquidity >= CONFIG["mm_min_liquidity"]
+                if (not is_meme_market and mm_pass_price and mm_pass_bid and mm_pass_vol and mm_pass_liq):
 
                     spread = best_ask - best_bid
                     spread_pct = spread / ((best_ask + best_bid) / 2) if (best_ask + best_bid) > 0 else 0
                     mid_price = (best_ask + best_bid) / 2
 
-                    # Only MM if spread is in our target range (2-8%)
+                    if not (CONFIG["mm_min_spread"] <= spread_pct <= CONFIG["mm_max_spread"]):
+                        print(f"[MM_DEBUG] Spread miss: {question[:45]}... bid={best_bid:.3f} ask={best_ask:.3f} spread={spread_pct:.1%} (need {CONFIG['mm_min_spread']:.0%}-{CONFIG['mm_max_spread']:.0%})")
+
                     if CONFIG["mm_min_spread"] <= spread_pct <= CONFIG["mm_max_spread"]:
                         expected_return = CONFIG["mm_target_profit"]
                         hours_to_fill = 4
                         days_to_fill = hours_to_fill / 24
                         annualized = min(self.calculate_annualized_return(expected_return, max(1, int(days_to_fill * 10))), 10.0)
 
+                        # Data-driven confidence based on price zone + category
+                        if in_sweet_spot and is_preferred:
+                            confidence = 0.85
+                        elif in_sweet_spot:
+                            confidence = 0.75
+                        elif in_fallback and is_preferred:
+                            confidence = 0.65
+                        else:
+                            confidence = 0.55
+                        # Reduce confidence for crypto (negative Kelly)
+                        if is_negative_category:
+                            confidence -= 0.10
+
+                        zone = "sweet" if in_sweet_spot else "fallback"
                         opportunities.append({
                             "condition_id": condition_id,
                             "question": question,
@@ -803,16 +997,17 @@ class MarketScanner:
                             "best_ask": best_ask,
                             "spread": spread,
                             "spread_pct": spread_pct,
-                            "mm_bid": round(mid_price - max(mid_price * 0.02, 0.01), 3),
-                            "mm_ask": round(mid_price + max(mid_price * 0.02, 0.01), 3),
+                            "mm_bid": round(mid_price - max(mid_price * CONFIG["mm_target_profit"], 0.01), 3),
+                            "mm_ask": round(mid_price + max(mid_price * CONFIG["mm_target_profit"], 0.01), 3),
                             "expected_return": expected_return,
                             "annualized_return": annualized,
                             "days_to_resolve": days_to_resolve,
                             "end_date": end_date_str,
                             "liquidity": liquidity,
                             "volume_24h": volume_24h,
-                            "confidence": 0.80 if is_preferred else 0.65,
-                            "reason": f"MM: Spread {spread_pct:.1%}, Vol ${volume_24h/1000:.0f}k, {days_to_resolve}d to resolve"
+                            "confidence": confidence,
+                            "price_zone": zone,
+                            "reason": f"MM[{zone}]: Spread {spread_pct:.1%}, Vol ${volume_24h/1000:.0f}k, {days_to_resolve}d, conf={confidence:.2f}"
                         })
 
             # Strategy 8: BINANCE ARBITRAGE (Crypto price lag arbitrage)
@@ -884,15 +1079,14 @@ class MarketScanner:
 
         # Pick top N from each strategy (diversity)
         # DUAL_SIDE_ARB first - guaranteed profit
-        # BINANCE_ARB second - fast crypto arbitrage
-        # MARKET_MAKER third - spread capture
+        # MARKET_MAKER — spread capture (fast turnover, high hit rate)
         diverse_opps = []
         # Allow more slots for fast-turnover and high-hit-rate strategies
-        fast_strats = {"MARKET_MAKER": 4, "BINANCE_ARB": 3, "NEAR_CERTAIN": 3, "NEAR_ZERO": 3}
+        fast_strats = {"MARKET_MAKER": 4, "NEAR_CERTAIN": 3, "NEAR_ZERO": 3, "NEG_RISK_ARB": 3}
 
         # DEBUG: Log opportunities by strategy
         strategy_summary = {}
-        all_strategies = ["DUAL_SIDE_ARB", "MARKET_MAKER", "MEAN_REVERSION",
+        all_strategies = ["NEG_RISK_ARB", "DUAL_SIDE_ARB", "MARKET_MAKER", "MEAN_REVERSION",
                           "NEAR_CERTAIN", "NEAR_ZERO", "MID_RANGE", "VOLUME_SURGE", "DIP_BUY"]
         # BINANCE_ARB removed: Polymarket's 3.15% dynamic crypto fees killed the edge
 
@@ -933,6 +1127,146 @@ class MarketScanner:
             print(f"       [FILTERED to: {STRATEGY_FILTER}]")
 
         return result[:10]
+
+    # --- NEG_RISK MULTI-OUTCOME ARBITRAGE ---
+
+    GAMMA_EVENTS_API = "https://gamma-api.polymarket.com/events"
+
+    async def fetch_negrisk_events(self) -> List[dict]:
+        """Fetch active NegRisk events with multiple outcomes from Gamma API."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {
+                    "active": "true",
+                    "closed": "false",
+                    "negRisk": "true",  # CRITICAL: only NegRisk events (mutually exclusive outcomes)
+                    "limit": 50,
+                }
+                async with session.get(self.GAMMA_EVENTS_API, params=params, timeout=15) as resp:
+                    if resp.status == 200:
+                        events = await resp.json()
+                        # Filter to multi-outcome events (3+ markets)
+                        min_outcomes = CONFIG.get("negrisk_min_outcomes", 3)
+                        multi = []
+                        for event in events:
+                            markets = event.get("markets", [])
+                            if len(markets) >= min_outcomes:
+                                multi.append(event)
+                        return multi
+        except Exception as e:
+            print(f"[NEGRISK] Fetch error: {e}")
+        return []
+
+    def find_negrisk_opportunities(self, events: List[dict]) -> List[dict]:
+        """Find arbitrage opportunities in multi-outcome NegRisk events.
+
+        For mutually exclusive outcomes, the sum of all YES prices should equal $1.00.
+        If bid_sum > 1.0 → sell all outcomes for guaranteed profit.
+        If ask_sum < 1.0 → buy all outcomes for guaranteed profit.
+        """
+        min_edge = CONFIG.get("negrisk_min_edge", 0.005)
+        max_edge = CONFIG.get("negrisk_max_edge", 0.10)
+        min_liquidity = CONFIG.get("negrisk_min_liquidity", 5000)
+        max_outcomes = CONFIG.get("negrisk_max_outcomes", 50)
+        opportunities = []
+
+        for event in events:
+            markets = event.get("markets", [])
+            num_outcomes = len(markets)
+
+            # Skip if too many outcomes (execution risk)
+            if num_outcomes > max_outcomes:
+                continue
+
+            # Collect prices and check liquidity
+            bids = []
+            asks = []
+            liquidities = []
+            outcome_prices = []
+            skip = False
+
+            for m in markets:
+                bid = float(m.get("bestBid") or 0)
+                ask = float(m.get("bestAsk") or 0)
+                liq = float(m.get("liquidityNum") or 0)
+
+                if liq < min_liquidity:
+                    skip = True
+                    break
+
+                bids.append(bid)
+                asks.append(ask)
+                liquidities.append(liq)
+                outcome_prices.append({"question": m.get("question", "?"), "bid": bid, "ask": ask})
+
+            if skip:
+                continue
+
+            bid_sum = sum(bids)
+            ask_sum = sum(asks)
+
+            # Calculate days to resolve
+            end_date = event.get("endDate") or ""
+            days_to_resolve = 30  # default
+            if end_date:
+                try:
+                    end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    days_to_resolve = max(1, (end_dt - datetime.now(timezone.utc)).days)
+                except (ValueError, TypeError):
+                    pass
+
+            event_id = event.get("id", str(hash(event.get("title", ""))))
+            event_title = event.get("title", "Unknown Event")
+
+            # SELL ARB: bid_sum > 1.0 means we can sell YES on all outcomes
+            # Revenue = bid_sum, Liability = 1.0 (one outcome resolves YES)
+            if bid_sum > 1.0 + min_edge:
+                edge = bid_sum - 1.0
+                # Sanity check: edge > max_edge means outcomes are NOT mutually exclusive
+                if edge > max_edge:
+                    continue
+                annualized = self.calculate_annualized_return(edge, days_to_resolve) if days_to_resolve > 0 else 0
+                opportunities.append({
+                    "condition_id": f"negrisk_sell_{event_id}",
+                    "question": event_title,
+                    "strategy": "NEG_RISK_ARB",
+                    "side": "SELL_ALL",
+                    "price": bid_sum,
+                    "expected_return": edge,
+                    "annualized_return": annualized,
+                    "days_to_resolve": days_to_resolve,
+                    "liquidity": min(liquidities),
+                    "confidence": 0.95,
+                    "num_outcomes": num_outcomes,
+                    "outcome_prices": outcome_prices,
+                    "reason": f"NegRisk SELL: {num_outcomes} outcomes, bid_sum={bid_sum:.3f}, edge={edge:.1%}"
+                })
+
+            # BUY ARB: ask_sum < 1.0 means we can buy YES on all outcomes
+            # Cost = ask_sum, Payout = 1.0 (one outcome resolves YES)
+            if ask_sum < 1.0 - min_edge:
+                edge = 1.0 - ask_sum
+                # Sanity check: edge > max_edge means outcomes are NOT mutually exclusive
+                if edge > max_edge:
+                    continue
+                annualized = self.calculate_annualized_return(edge, days_to_resolve) if days_to_resolve > 0 else 0
+                opportunities.append({
+                    "condition_id": f"negrisk_buy_{event_id}",
+                    "question": event_title,
+                    "strategy": "NEG_RISK_ARB",
+                    "side": "BUY_ALL",
+                    "price": ask_sum,
+                    "expected_return": edge,
+                    "annualized_return": annualized,
+                    "days_to_resolve": days_to_resolve,
+                    "liquidity": min(liquidities),
+                    "confidence": 0.95,
+                    "num_outcomes": num_outcomes,
+                    "outcome_prices": outcome_prices,
+                    "reason": f"NegRisk BUY: {num_outcomes} outcomes, ask_sum={ask_sum:.3f}, edge={edge:.1%}"
+                })
+
+        return opportunities
 
 
 # ============================================================
@@ -1016,7 +1350,9 @@ class TradingEngine:
         )
         self.scanner = MarketScanner()
         self.news = NewsAnalyzer()
+        self.news_intel = NewsIntelligence()
         self.running = False
+        self._last_scan_time = None  # Track when we last scanned for new opportunities
 
         # AI market screening (Gemini - free tier)
         if CONFIG.get("mm_ai_screen"):
@@ -1038,9 +1374,133 @@ class TradingEngine:
             self.executor = None
             self.safety = None
 
+        # Circuit breaker — tracks stop losses per market to prevent re-entry death loops
+        # {condition_id: [datetime, datetime, ...]}  — timestamps of recent stop exits
+        self.stop_tracker: dict[str, list] = {}
+        self.MAX_STOPS_PER_DAY = 2  # After 2 stops on same market in 24h, lock it out
+        self._stop_tracker_file = Path(__file__).parent / "data" / "stop_tracker.json"
+        self._load_stop_tracker()
+
         # Snapshot logger — saves real bid/ask/volume every cycle for future backtesting
         self.snapshot_dir = Path(__file__).parent / "data" / "snapshots"
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        # WebSocket real-time price feed (opt-in)
+        self.ws = None
+        self.ws_prices = {}        # {asset_id: {"price": float, "ts": datetime}}
+        self._ws_task = None       # Background listener task
+        if CONFIG.get("use_websocket"):
+            try:
+                from core.ws_listener import MarketWebSocket
+                self.ws = MarketWebSocket(on_price_change=self._on_ws_price)
+                print("[WS] WebSocket listener initialized (will connect on run)")
+            except Exception as e:
+                print(f"[WS] Init failed ({e}), falling back to REST polling")
+                self.ws = None
+
+        # Monte Carlo Cap 3 Half Kelly validation at startup
+        # Validates that Half Kelly fraction survives realistic variance
+        if CONFIG.get("use_kelly"):
+            try:
+                # Compute actual bet fraction for representative sweet-spot trade
+                avg_price = 0.60
+                emp_prob = empirical_probability(avg_price, "politics")  # Conservative
+                raw_kelly = (emp_prob - avg_price) / (1 - avg_price)
+                bet_fraction = min(
+                    raw_kelly * CONFIG["kelly_fraction"],  # Half Kelly applied
+                    CONFIG["kelly_max_position"],          # Cap 3
+                )
+                mc = monte_carlo_validate(
+                    bet_fraction=bet_fraction,
+                    win_prob=emp_prob,
+                    payout_ratio=(1 - avg_price) / avg_price,
+                )
+                if mc.validated_fraction < bet_fraction:
+                    # Scale down the Half Kelly multiplier proportionally
+                    scale = mc.validated_fraction / bet_fraction
+                    CONFIG["kelly_fraction"] *= scale
+                    print(f"[KELLY-MC] Reduced multiplier to {CONFIG['kelly_fraction']:.2%} "
+                          f"(95th pctl DD: {mc.p95_drawdown:.1%})")
+                else:
+                    print(f"[KELLY-MC] Half Kelly validated "
+                          f"(95th pctl DD: {mc.p95_drawdown:.1%}, "
+                          f"ruin: {mc.ruin_probability:.2%})")
+                self._mc_validated = True
+            except Exception as e:
+                print(f"[KELLY-MC] Validation failed ({e}), using default fraction")
+                self._mc_validated = False
+        else:
+            self._mc_validated = False
+
+    # ============================================================
+    # WEBSOCKET PRICE FEED
+    # ============================================================
+
+    async def _on_ws_price(self, data: dict):
+        """Callback for WebSocket price updates. Updates local cache."""
+        asset_id = data.get("asset_id")
+        price = data.get("price")
+        if asset_id and price is not None:
+            self.ws_prices[asset_id] = {
+                "price": float(price),
+                "ts": datetime.now(timezone.utc),
+            }
+
+    async def _get_market_price(self, condition_id: str, position: dict = None) -> Optional[float]:
+        """
+        Get current YES price, preferring WebSocket over REST.
+
+        Checks WS cache first (by token_id from position). If stale or
+        unavailable, falls back to REST via scanner.get_market_price().
+        """
+        # Try WebSocket cache first
+        if self.ws and position:
+            token_id = position.get("token_id")
+            if token_id and token_id in self.ws_prices:
+                entry = self.ws_prices[token_id]
+                age = (datetime.now(timezone.utc) - entry["ts"]).total_seconds()
+                stale_limit = CONFIG.get("ws_stale_seconds", 30)
+                if age < stale_limit:
+                    return entry["price"]
+
+        # Fallback to REST
+        return await self.scanner.get_market_price(condition_id)
+
+    async def _ws_subscribe_position(self, token_id: str):
+        """Subscribe to WS updates for a new position's token."""
+        if self.ws and self.ws.connected and token_id:
+            await self.ws.subscribe([token_id])
+
+    async def _ws_start(self):
+        """Connect WS and subscribe to tokens of existing positions."""
+        if not self.ws:
+            return
+
+        connected = await self.ws.connect()
+        if not connected:
+            print("[WS] Initial connection failed, will use REST polling")
+            return
+
+        # Subscribe to tokens of open positions
+        token_ids = []
+        for pos in self.portfolio.positions.values():
+            tid = pos.get("token_id")
+            if tid:
+                token_ids.append(tid)
+        if token_ids:
+            await self.ws.subscribe(token_ids)
+            print(f"[WS] Subscribed to {len(token_ids)} open position tokens")
+
+        # Start listener as background task
+        self._ws_task = asyncio.create_task(self.ws.listen())
+
+    async def _ws_health_check(self):
+        """Check WS health and reconnect if needed."""
+        if not self.ws:
+            return
+        if not await self.ws.health_check():
+            print("[WS] Connection unhealthy, attempting reconnect...")
+            await self.ws._reconnect()
 
     async def check_exits(self):
         """Check all positions for exit conditions."""
@@ -1070,8 +1530,25 @@ class TradingEngine:
                 await self._check_mm_exit(condition_id, position)
                 continue
 
-            yes_price = await self.scanner.get_market_price(condition_id)
+            yes_price = await self._get_market_price(condition_id, position)
             if yes_price is None:
+                # Market not in active feed — check if it resolved
+                res_yes_price = await self.scanner.get_resolution_price(condition_id)
+                if res_yes_price is not None:
+                    # We know the resolution outcome — price it correctly
+                    if position["side"] == "NO":
+                        exit_price = 1.0 - res_yes_price  # NO pays out if YES=0
+                    else:
+                        exit_price = res_yes_price  # YES pays out if YES=1
+                    result = self.portfolio.sell(condition_id, exit_price, "RESOLVED")
+                    if result["success"]:
+                        trade = result["trade"]
+                        outcome = "YES WON" if res_yes_price >= 0.5 else "NO WON"
+                        print(f"[TRADE] RESOLVED ({outcome}): {trade['question'][:40]}...")
+                        print(f"        Exit @ ${exit_price:.3f} | P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
+                else:
+                    # Not in closed markets either — truly gone or API lag, skip for now
+                    pass
                 continue
 
             # IMPORTANT: For NO positions, current value = 1 - YES_price
@@ -1084,27 +1561,48 @@ class TradingEngine:
             if pnl_pct is None:
                 continue
 
-            # Take profit (3% now for faster exits)
+            strategy = position.get("strategy", "")
+            # Resolution strategies (NEAR_CERTAIN, NEAR_ZERO) hold until resolution —
+            # stop losses make no sense since they pay out at $1 or $0, not intraday price.
+            # Only apply TP/SL to strategies that actively trade intraday.
+            no_stop_strategies = {"NEAR_CERTAIN", "NEAR_ZERO"}
+
+            # Take profit — taker fee + slippage applies (selling on CLOB)
             if pnl_pct >= CONFIG["take_profit_pct"]:
-                result = self.portfolio.sell(condition_id, current_price, "TAKE_PROFIT")
+                liq = position.get("liquidity", 50000)
+                slip = taker_slippage(liq)
+                exit_price = current_price * (1 - slip)  # Slippage works against seller
+                exit_fee = polymarket_taker_fee(exit_price)
+                result = self.portfolio.sell(condition_id, exit_price, "TAKE_PROFIT", fee_pct=exit_fee)
                 if result["success"]:
                     trade = result["trade"]
                     print(f"[TRADE] TAKE PROFIT: {trade['question'][:40]}...")
                     print(f"        P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
-                    # Record cooldown for MEAN_REVERSION
-                    if position.get("strategy") == "MEAN_REVERSION":
+                    if strategy == "MEAN_REVERSION":
                         self.scanner.mr_cooldowns[condition_id] = datetime.now(timezone.utc)
 
-            # Stop loss (10% now for tighter risk)
-            elif pnl_pct <= CONFIG["stop_loss_pct"]:
-                result = self.portfolio.sell(condition_id, current_price, "STOP_LOSS")
+            # Stop loss — skip for resolution strategies. Taker fee + slippage applies.
+            elif pnl_pct <= CONFIG["stop_loss_pct"] and strategy not in no_stop_strategies:
+                liq = position.get("liquidity", 50000)
+                slip = taker_slippage(liq)
+                exit_price = current_price * (1 - slip)  # Slippage works against seller
+                exit_fee = polymarket_taker_fee(exit_price)
+                result = self.portfolio.sell(condition_id, exit_price, "STOP_LOSS", fee_pct=exit_fee)
                 if result["success"]:
                     trade = result["trade"]
                     print(f"[TRADE] STOP LOSS: {trade['question'][:40]}...")
                     print(f"        P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
-                    # Record cooldown for MEAN_REVERSION
-                    if position.get("strategy") == "MEAN_REVERSION":
+                    if strategy == "MEAN_REVERSION":
                         self.scanner.mr_cooldowns[condition_id] = datetime.now(timezone.utc)
+                    # Record stop in circuit breaker for active trading strategies
+                    if strategy in {"DIP_BUY", "VOLUME_SURGE", "MID_RANGE"}:
+                        if condition_id not in self.stop_tracker:
+                            self.stop_tracker[condition_id] = []
+                        self.stop_tracker[condition_id].append(datetime.now(timezone.utc))
+                        self._save_stop_tracker()
+                        stop_count = len(self._get_recent_stops(condition_id))
+                        if stop_count >= self.MAX_STOPS_PER_DAY:
+                            print(f"        CIRCUIT BREAKER: {stop_count} stops in 24h — market locked out")
 
     async def _check_mm_exit(self, condition_id: str, position: dict):
         """
@@ -1127,23 +1625,48 @@ class TradingEngine:
         mm_bid = position.get("mm_bid", position["entry_price"])
         entry_time_str = position.get("mm_entry_time", position.get("entry_time", ""))
 
-        # Get current market price
-        yes_price = await self.scanner.get_market_price(condition_id)
-        if yes_price is None:
-            return
-
-        current_price = yes_price  # MM positions are always YES side
-
-        # Calculate hold time
+        # Calculate hold time first — needed for timeout even without a price
         try:
             entry_time = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
             hold_hours = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
         except:
             hold_hours = 0
 
+        # Get current market price (prefer WS, fallback REST)
+        yes_price = await self._get_market_price(condition_id, position)
+
+        # If market has disappeared, look up the actual resolution outcome
+        if yes_price is None:
+            res_yes_price = await self.scanner.get_resolution_price(condition_id)
+            if res_yes_price is not None:
+                # MM positions are YES-side — use actual YES resolution price
+                exit_price = res_yes_price  # 1.0 if YES won, 0.0 if NO won
+                result = self.portfolio.sell(condition_id, exit_price, "MM_RESOLVED")
+                if result["success"]:
+                    trade = result["trade"]
+                    outcome = "YES WON" if res_yes_price >= 0.5 else "NO WON"
+                    print(f"[MM] RESOLVED ({outcome}): {trade['question'][:40]}...")
+                    print(f"     Entry: ${trade['entry_price']:.3f} → Resolution: ${exit_price:.3f}")
+                    print(f"     P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%) in {hold_hours:.1f}h")
+            elif hold_hours >= 1.0:
+                # Not in closed API either — use entry price as fallback after 1h
+                exit_price = position["entry_price"]
+                result = self.portfolio.sell(condition_id, exit_price, "MM_DELISTED")
+                if result["success"]:
+                    trade = result["trade"]
+                    print(f"[MM] DELISTED: {trade['question'][:40]}... (market gone, P&L: ${trade['pnl']:+.2f})")
+            return
+
+        current_price = yes_price  # MM positions are always YES side
+
         # EXIT CONDITION 1: Price reached our ask (PROFIT!)
+        # MM_FILLED = maker exit (our ask was taken by taker) = ZERO fee
+        # Sim realism: only 60% of touches actually fill (partial fills, front-running)
         if current_price >= mm_ask:
-            result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED")
+            fill_prob = CONFIG.get("mm_fill_probability", 0.60)
+            if random.random() > fill_prob:
+                return  # Not filled this cycle — will re-check next cycle
+            result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED", fee_pct=0.0)
             if result["success"]:
                 trade = result["trade"]
                 print(f"[MM] FILLED! {trade['question'][:40]}...")
@@ -1152,25 +1675,40 @@ class TradingEngine:
             return
 
         # EXIT CONDITION 2: Price dropped too much (STOP LOSS)
-        # MM positions use tighter stop (3%) since we're trading frequently
+        # MM_STOP = taker exit (crossing spread to exit) = taker fee + slippage
         mm_stop_loss = -0.03
         pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
         if pnl_pct <= mm_stop_loss:
-            result = self.portfolio.sell(condition_id, current_price, "MM_STOP")
+            slippage = CONFIG.get("mm_slippage_bps", 20) / 10000
+            exit_price = current_price * (1 - slippage)  # Slippage works against us
+            stop_fee = polymarket_taker_fee(exit_price)
+            result = self.portfolio.sell(condition_id, exit_price, "MM_STOP", fee_pct=stop_fee)
             if result["success"]:
                 trade = result["trade"]
+                # Record stop in circuit breaker tracker
+                if condition_id not in self.stop_tracker:
+                    self.stop_tracker[condition_id] = []
+                self.stop_tracker[condition_id].append(datetime.now(timezone.utc))
+                self._save_stop_tracker()
+                stop_count = len(self._get_recent_stops(condition_id))
                 print(f"[MM] STOP: {trade['question'][:40]}...")
-                print(f"     Entry: ${trade['entry_price']:.3f} → Exit: ${current_price:.3f}")
+                print(f"     Entry: ${trade['entry_price']:.3f} → Exit: ${exit_price:.3f} (slip {slippage:.2%})")
                 print(f"     P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%) - Cut loss!")
+                if stop_count >= self.MAX_STOPS_PER_DAY:
+                    print(f"     CIRCUIT BREAKER: {stop_count} stops in 24h — market locked out")
             return
 
         # EXIT CONDITION 3: Timeout (didn't fill in time)
+        # MM_TIMEOUT = taker exit (exiting at market) = taker fee + slippage
         if hold_hours >= CONFIG["mm_max_hold_hours"]:
-            result = self.portfolio.sell(condition_id, current_price, "MM_TIMEOUT")
+            slippage = CONFIG.get("mm_slippage_bps", 20) / 10000
+            exit_price = current_price * (1 - slippage)
+            timeout_fee = polymarket_taker_fee(exit_price)
+            result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT", fee_pct=timeout_fee)
             if result["success"]:
                 trade = result["trade"]
                 print(f"[MM] TIMEOUT: {trade['question'][:40]}...")
-                print(f"     Held {hold_hours:.1f}h without fill, exiting at market")
+                print(f"     Held {hold_hours:.1f}h without fill, exiting at ${exit_price:.3f} (slip {slippage:.2%})")
                 print(f"     P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
             return
 
@@ -1239,9 +1777,10 @@ class TradingEngine:
             sell_retries = position.get("sell_retries", 0)
             if sell_retries >= 5:
                 # Give up on post-only, exit at market to avoid being stuck
-                current_price = await self.scanner.get_market_price(condition_id)
+                current_price = await self._get_market_price(condition_id, position)
                 if current_price and current_price > 0:
-                    result = self.portfolio.sell(condition_id, current_price, "MM_SELL_FAILED")
+                    sell_failed_fee = polymarket_taker_fee(current_price)
+                    result = self.portfolio.sell(condition_id, current_price, "MM_SELL_FAILED", fee_pct=sell_failed_fee)
                     if result["success"]:
                         trade = result["trade"]
                         if self.live:
@@ -1277,8 +1816,8 @@ class TradingEngine:
             original = status.get("original_size", 0)
 
             if original > 0 and matched >= original * 0.95:
-                # Sell order filled - PROFIT!
-                result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED")
+                # Sell order filled - PROFIT! Maker exit = zero fee
+                result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED", fee_pct=0.0)
                 if result["success"]:
                     trade = result["trade"]
                     self.safety.record_trade_pnl(trade["pnl"])
@@ -1286,7 +1825,7 @@ class TradingEngine:
                 return
 
             # Check stop-loss and timeout while waiting for sell fill
-            current_price = await self.scanner.get_market_price(condition_id)
+            current_price = await self._get_market_price(condition_id, position)
             if current_price is None:
                 return
 
@@ -1304,10 +1843,16 @@ class TradingEngine:
                     price=exit_price, size=round(position["shares"], 2),
                     post_only=False  # Allow taker to exit fast
                 )
-                result = self.portfolio.sell(condition_id, exit_price, "MM_STOP")
+                live_stop_fee = polymarket_taker_fee(exit_price)
+                result = self.portfolio.sell(condition_id, exit_price, "MM_STOP", fee_pct=live_stop_fee)
                 if result["success"]:
                     trade = result["trade"]
                     self.safety.record_trade_pnl(trade["pnl"])
+                    # Record stop in circuit breaker tracker
+                    if condition_id not in self.stop_tracker:
+                        self.stop_tracker[condition_id] = []
+                    self.stop_tracker[condition_id].append(datetime.now(timezone.utc))
+                    self._save_stop_tracker()
                     print(f"[MM-LIVE] STOP LOSS @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
 
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
@@ -1321,7 +1866,8 @@ class TradingEngine:
                     price=exit_price, size=round(position["shares"], 2),
                     post_only=False
                 )
-                result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT")
+                live_timeout_fee = polymarket_taker_fee(exit_price)
+                result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT", fee_pct=live_timeout_fee)
                 if result["success"]:
                     trade = result["trade"]
                     self.safety.record_trade_pnl(trade["pnl"])
@@ -1333,6 +1879,67 @@ class TradingEngine:
                 position["sell_order_id"] = ""
                 self.portfolio._save()
                 print(f"[MM-LIVE] SELL CANCELLED externally, will repost next cycle")
+
+    def _load_stop_tracker(self):
+        """Load stop tracker from disk (survives process restarts)."""
+        try:
+            if self._stop_tracker_file.exists():
+                with open(self._stop_tracker_file, "r") as f:
+                    raw = json.load(f)
+                self.stop_tracker = {}
+                for cid, timestamps in raw.items():
+                    self.stop_tracker[cid] = [
+                        datetime.fromisoformat(ts) for ts in timestamps
+                    ]
+                print(f"[INIT] Loaded stop tracker: {len(self.stop_tracker)} markets tracked")
+        except Exception as e:
+            print(f"[INIT] Could not load stop tracker: {e}")
+            self.stop_tracker = {}
+
+    def _save_stop_tracker(self):
+        """Save stop tracker to disk (atomic write)."""
+        try:
+            raw = {}
+            for cid, timestamps in self.stop_tracker.items():
+                raw[cid] = [ts.isoformat() for ts in timestamps]
+            tmp_file = self._stop_tracker_file.with_suffix(".json.tmp")
+            with open(tmp_file, "w") as f:
+                json.dump(raw, f, indent=2)
+            tmp_file.replace(self._stop_tracker_file)
+        except Exception as e:
+            print(f"[WARN] Could not save stop tracker: {e}")
+
+    def _get_recent_stops(self, condition_id: str, hours: int = 24) -> list:
+        """Get stop timestamps for a market within the last N hours."""
+        if condition_id not in self.stop_tracker:
+            return []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        recent = [ts for ts in self.stop_tracker[condition_id] if ts > cutoff]
+        # Clean up old entries
+        self.stop_tracker[condition_id] = recent
+        return recent
+
+    async def _ai_reentry_check(self, opp: dict, stop_count: int) -> bool:
+        """Ask Gemini whether re-entering a previously stopped market makes sense."""
+        if not self.gemini:
+            return False  # No AI available — don't re-enter stopped markets blindly
+
+        question = opp.get("question", "")
+        price = opp.get("price", 0)
+        try:
+            result = await self.gemini.evaluate_reentry(
+                question=question,
+                current_price=price,
+                stop_count=stop_count,
+                volume_24h=opp.get("volume_24h", 0),
+            )
+            approved = result.get("reenter", False)
+            reason = result.get("reason", "no reason")
+            print(f"[AI-REENTRY] {question[:40]}... → {'APPROVED' if approved else 'REJECTED'}: {reason}")
+            return approved
+        except Exception as e:
+            print(f"[AI-REENTRY] Error: {e} — blocking re-entry")
+            return False
 
     async def evaluate_opportunity(self, opp: dict) -> bool:
         """Evaluate if we should trade an opportunity."""
@@ -1347,6 +1954,20 @@ class TradingEngine:
             print(f"[EVAL] {opp['strategy']}: REJECTED (max positions {len(self.portfolio.positions)}/{CONFIG['max_positions']})")
             return False
 
+        # CIRCUIT BREAKER: Block re-entry after too many stops on same market
+        # Applies to all active trading strategies (not arb, not resolution, not MEAN_REVERSION which has own cooldown)
+        CIRCUIT_BREAKER_STRATEGIES = {"MARKET_MAKER", "DIP_BUY", "VOLUME_SURGE", "MID_RANGE"}
+        if opp["strategy"] in CIRCUIT_BREAKER_STRATEGIES:
+            recent_stops = self._get_recent_stops(condition_id)
+            if len(recent_stops) >= self.MAX_STOPS_PER_DAY:
+                print(f"[CIRCUIT BREAKER] {opp['question'][:40]}... BLOCKED ({len(recent_stops)} stops in 24h)")
+                return False
+            # If 1 stop exists, require AI approval before re-entering
+            if len(recent_stops) >= 1:
+                approved = await self._ai_reentry_check(opp, len(recent_stops))
+                if not approved:
+                    return False
+
         # Check news sentiment (uses Claude API sparingly)
         if opp["strategy"] in ["DIP_BUY", "VOLUME_SURGE"]:
             news = await self.news.analyze_market(opp["question"])
@@ -1354,10 +1975,18 @@ class TradingEngine:
                 print(f"[NEWS] {opp['question'][:40]}...")
                 print(f"       {news.get('direction', 'NEUTRAL')} ({news.get('confidence', 0):.0%})")
 
-                # Require bullish news for dip buys
+                # Block dip buys only when bearish news confirms the dip is justified
                 if opp["strategy"] == "DIP_BUY":
-                    if news.get("direction") != "BULLISH" or news.get("confidence", 0) < 0.6:
-                        print(f"       Skipping: News not bullish enough")
+                    if news.get("direction") == "BEARISH" and news.get("confidence", 0) >= 0.6:
+                        print(f"       Skipping: Bearish news confirms dip ({news.get('confidence', 0):.0%})")
+                        return False
+                # Require news direction to match surge direction
+                elif opp["strategy"] == "VOLUME_SURGE":
+                    surge_side = opp.get("side", "YES")
+                    expected_direction = "BULLISH" if surge_side == "YES" else "BEARISH"
+                    news_direction = news.get("direction", "NEUTRAL")
+                    if news_direction != expected_direction or news.get("confidence", 0) < 0.5:
+                        print(f"       Skipping: News {news_direction} doesn't support {surge_side} surge")
                         return False
 
         confidence_ok = opp["confidence"] >= CONFIG["min_confidence"]
@@ -1367,20 +1996,48 @@ class TradingEngine:
 
     async def execute_trade(self, opp: dict):
         """Execute a trade for an opportunity using REAL market prices."""
-        # Calculate position size using Kelly Criterion if enabled
-        # These strategies use fixed % sizing (Kelly undersizes them due to moderate edges)
-        if CONFIG.get("use_kelly", False) and opp["strategy"] not in ["DUAL_SIDE_ARB", "MARKET_MAKER", "MEAN_REVERSION", "MID_RANGE"]:
+        # CAPITAL RESERVATION: Hold-and-wait strategies capped at 50% of capital
+        # so MARKET_MAKER always has capital for active trading
+        hold_strategies = {"NEAR_CERTAIN", "NEAR_ZERO", "MID_RANGE", "MEAN_REVERSION", "NEG_RISK_ARB"}
+        if opp["strategy"] in hold_strategies:
+            hold_capital = sum(
+                p["cost_basis"] for p in self.portfolio.positions.values()
+                if p.get("strategy") in hold_strategies
+            )
+            if hold_capital >= self.portfolio.initial_balance * 0.50:
+                print(f"[TRADE] Skipping {opp['strategy']}: Hold strategies at cap (${hold_capital:.0f}/{self.portfolio.initial_balance * 0.50:.0f})")
+                return
+
+        # Optional: AI Validator pre-trade check (fail-open if unreachable)
+        if os.getenv("ENABLE_VALIDATOR"):
+            try:
+                validation = await self._call_validator(opp)
+                if validation and not validation.get("approved", True):
+                    print(f"[VALIDATOR] REJECTED: {validation.get('reason', 'unknown')}")
+                    return
+                elif validation and validation.get("risk_flags"):
+                    flags = validation["risk_flags"]
+                    print(f"[VALIDATOR] APPROVED with {len(flags)} warning(s): {flags[0]}")
+            except Exception as e:
+                print(f"[VALIDATOR] Unreachable ({e}), proceeding with trade")
+
+        # Calculate position size using Monte Carlo Cap 3 Half Kelly
+        # Arb strategies (guaranteed profit) and MM (spread capture, high turnover) use fixed %
+        if CONFIG.get("use_kelly", False) and opp["strategy"] not in ["DUAL_SIDE_ARB", "NEG_RISK_ARB", "MARKET_MAKER"]:
             kelly = KellyCriterion(
-                kelly_fraction=CONFIG.get("kelly_fraction", 0.25),
-                max_position_pct=CONFIG.get("kelly_max_position", 0.15),
-                min_edge=CONFIG.get("kelly_min_edge", 0.03)
+                kelly_fraction=CONFIG.get("kelly_fraction", 0.50),
+                max_position_pct=CONFIG.get("kelly_max_position", 0.30),
+                min_edge=CONFIG.get("kelly_min_edge", 0.02),
+                mc_validated=getattr(self, '_mc_validated', False),
             )
             kelly_result = kelly.calculate_from_opportunity(opp, self.portfolio.balance)
 
             if kelly_result:
                 max_amount = kelly_result.position_size
+                emp_tag = "EMP" if kelly_result.empirical_edge_used else "HEU"
                 print(f"[KELLY] Edge: {kelly_result.edge:.1%} | Raw: {kelly_result.kelly_fraction:.1%} | "
-                      f"Adj: {kelly_result.adjusted_fraction:.1%} | Risk: {kelly_result.risk_level}")
+                      f"Half: {kelly_result.adjusted_fraction:.1%} | ${kelly_result.position_size:.0f} | "
+                      f"Risk: {kelly_result.risk_level} | {emp_tag}")
             else:
                 # Fall back to fixed percentage if Kelly returns None (no edge)
                 max_amount = self.portfolio.balance * CONFIG["max_position_pct"]
@@ -1398,6 +2055,11 @@ class TradingEngine:
         # Minimum position size
         if amount < 50:
             print(f"[TRADE] Skipping: Position too small (${amount:.2f} < $50 minimum)")
+            return
+
+        # NEG_RISK_ARB: Multi-outcome arbitrage — buy/sell all outcomes
+        if opp["strategy"] == "NEG_RISK_ARB":
+            await self._execute_negrisk_arb(opp, amount)
             return
 
         # DUAL_SIDE_ARB: Special handling - buy BOTH sides for guaranteed profit
@@ -1469,23 +2131,112 @@ class TradingEngine:
                 print(f"             {opp['strategy']} | {opp['question'][:50]}...")
             return
         else:
-            # SIMULATION: Record virtual trade
+            # SIMULATION: Record virtual trade with realistic fees + slippage
+            is_maker = opp["strategy"] in MAKER_STRATEGIES
+            entry_fee = 0.0 if is_maker else polymarket_taker_fee(opp["price"])
+            # Taker slippage: worse fill on thin markets (makers have own slippage in Phase 2)
+            if is_maker:
+                fill_price = opp["price"]
+            else:
+                slip = taker_slippage(opp.get("liquidity", 50000))
+                fill_price = opp["price"] * (1 + slip)  # Slippage works against buyer
             result = self.portfolio.buy(
                 condition_id=opp["condition_id"],
                 question=opp["question"],
                 side=opp["side"],
-                price=opp["price"],
+                price=fill_price,
                 amount=amount,
                 reason=opp["reason"],
-                strategy=opp["strategy"]  # Track strategy for A/B testing
+                strategy=opp["strategy"],
+                fee_pct=entry_fee,
             )
 
             if result["success"]:
+                # Store token_id for WS price feed
+                token_id = opp.get("token_id_yes")
+                if token_id:
+                    pos = self.portfolio.positions[opp["condition_id"]]
+                    pos["token_id"] = token_id
+                    self.portfolio._save()
+                    await self._ws_subscribe_position(token_id)
+
                 annualized = opp.get("annualized_return", 0)
                 days = opp.get("days_to_resolve", "?")
                 print(f"[TRADE] BUY ${amount:.2f} {opp['side']} @ {opp['price']:.3f}")
                 print(f"        Market: {opp['question'][:50]}...")
                 print(f"        Strategy: {opp['strategy']} | {days}d to resolve | {annualized:.0%} APY")
+
+    async def _call_validator(self, opp: dict) -> Optional[dict]:
+        """Call the AI Validator service for pre-trade approval."""
+        validator_url = os.getenv("VALIDATOR_URL", "http://validator:8100/validate")
+        payload = {
+            "condition_id": opp.get("condition_id", ""),
+            "question": opp.get("question", ""),
+            "strategy": opp.get("strategy", ""),
+            "side": opp.get("side"),
+            "price": opp.get("price"),
+            "amount": self.portfolio.balance * CONFIG["max_position_pct"],
+            "confidence": opp.get("confidence"),
+            "ai_score": opp.get("ai_score"),
+            "portfolio_summary": self.portfolio.get_summary(),
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(validator_url, json=payload,
+                                    timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+        return None
+
+    async def _execute_negrisk_arb(self, opp: dict, total_amount: float):
+        """
+        Execute NEG_RISK ARBITRAGE: Buy or sell YES on all outcomes of a multi-outcome event.
+
+        SELL_ALL: If bid_sum > 1.0, sell YES on all outcomes.
+          Revenue = bid_sum per share, Liability = 1.0 (one resolves YES).
+        BUY_ALL: If ask_sum < 1.0, buy YES on all outcomes.
+          Cost = ask_sum per share, Payout = 1.0 (one resolves YES).
+
+        Paper trading: record as a single position, lock in profit immediately.
+        """
+        side = opp.get("side", "BUY_ALL")
+        price_sum = opp.get("price", 1.0)  # bid_sum or ask_sum
+        num_outcomes = opp.get("num_outcomes", 0)
+
+        if side == "SELL_ALL":
+            edge = price_sum - 1.0
+        else:  # BUY_ALL
+            edge = 1.0 - price_sum
+
+        if edge <= 0:
+            print(f"[NEGRISK] Skipping: No edge ({side}, sum={price_sum:.3f})")
+            return
+
+        locked_profit = total_amount * edge
+
+        if self.live:
+            print(f"[NEGRISK] LIVE MODE: Would {side} {num_outcomes} outcomes, edge={edge:.1%}")
+            print(f"           Locked profit: ${locked_profit:.2f}")
+            return
+
+        # SIMULATION: Record as single position with guaranteed profit
+        # Arb entries are taker (buying from orderbook)
+        arb_fee = polymarket_taker_fee(price_sum if side == "BUY_ALL" else 1.0)
+        result = self.portfolio.buy(
+            condition_id=opp["condition_id"],
+            question=opp["question"],
+            side="BOTH",
+            price=price_sum if side == "BUY_ALL" else 1.0,
+            amount=total_amount,
+            reason=opp["reason"],
+            strategy="NEG_RISK_ARB",
+            fee_pct=arb_fee,
+        )
+
+        if result["success"]:
+            print(f"[NEGRISK] {side} ${total_amount:.2f} across {num_outcomes} outcomes")
+            print(f"           Sum: {price_sum:.3f} | Edge: {edge:.1%}")
+            print(f"           LOCKED PROFIT: ${locked_profit:.2f}")
+            print(f"           Event: {opp['question'][:60]}...")
 
     async def _execute_dual_side_arb(self, opp: dict, total_amount: float):
         """
@@ -1520,14 +2271,17 @@ class TradingEngine:
 
         # SIMULATION: Record as special dual-side position
         # We use "BOTH" side and track the guaranteed profit
+        # Arb entries are taker (buying from orderbook)
+        arb_fee = polymarket_taker_fee(total_cost)
         result = self.portfolio.buy(
             condition_id=opp["condition_id"],
             question=opp["question"],
-            side="BOTH",  # Special marker for dual-side arb
-            price=total_cost,  # Total cost per share
+            side="BOTH",
+            price=total_cost,
             amount=total_amount,
             reason=opp["reason"],
-            strategy="DUAL_SIDE_ARB"
+            strategy="DUAL_SIDE_ARB",
+            fee_pct=arb_fee,
         )
 
         if result["success"]:
@@ -1550,30 +2304,16 @@ class TradingEngine:
         Based on research: 10-200% APY for active market makers
         """
         mid_price = opp.get("price", 0)
-        # Use max of 2% or $0.01 minimum spread on each side (was 0.5%/$0.005)
-        mm_bid = opp.get("mm_bid", mid_price - max(mid_price * 0.02, 0.01))
-        mm_ask = opp.get("mm_ask", mid_price + max(mid_price * 0.02, 0.01))
-        spread_pct = opp.get("spread_pct", 0.02)
 
         if mid_price <= 0:
             print(f"[MM] Skipping: Invalid price ${mid_price}")
             return
 
-        # AI MARKET SCREEN: Ask Gemini if this market is worth trading
-        if CONFIG.get("mm_ai_screen") and hasattr(self, 'gemini') and self.gemini:
-            screen = await self.gemini.screen_market(
-                question=opp["question"],
-                price=mid_price,
-                end_date=opp.get("end_date", ""),
-                volume_24h=opp.get("volume_24h", 0),
-            )
-            score = screen.get("quality_score", 5)
-            approved = screen.get("approved", True)
-            if not approved or score < 5:
-                print(f"[MM] AI REJECTED ({score}/10): {opp['question'][:50]}... → {screen.get('reason', '')}")
-                return
-            else:
-                print(f"[MM] AI APPROVED ({score}/10): {opp['question'][:50]}...")
+        # Use AI-recommended spread if available (from Phase 2 deep screen), else default 2%
+        ai_spread = opp.get("ai_spread", CONFIG["mm_target_profit"])
+        mm_bid = round(mid_price - max(mid_price * ai_spread, 0.01), 3)
+        mm_ask = round(mid_price + max(mid_price * ai_spread, 0.01), 3)
+        spread_pct = opp.get("spread_pct", 0.02)
 
         # Split capital: half for bid (buying), half for ask (selling position)
         # But we need to BUY first to have something to sell
@@ -1630,25 +2370,30 @@ class TradingEngine:
                 pos["mm_bid"] = mm_bid
                 pos["mm_ask"] = mm_ask
                 pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
-                pos["mm_target_profit"] = CONFIG["mm_target_profit"]
+                pos["mm_target_profit"] = ai_spread
                 pos["buy_order_id"] = order_id
                 pos["sell_order_id"] = ""
                 pos["token_id"] = token_id
                 pos["live_state"] = "BUY_PENDING"
+                pos["sector"] = opp.get("sector", "other")
+                pos["ai_score"] = opp.get("ai_score", 0)
                 self.portfolio._save()
             return
 
         # SIMULATION: Record as MM position with special tracking
-        # We record the entry at our bid price (optimistic fill)
-        # The position will be monitored for exit at our ask price
+        # Entry at bid + slippage (realistic: we don't always get best bid)
+        # MM entry is maker (post-only limit) = ZERO fee
+        slippage = CONFIG.get("mm_slippage_bps", 20) / 10000
+        entry_price = mm_bid * (1 + slippage)  # Slippage works against us on buy
         result = self.portfolio.buy(
             condition_id=opp["condition_id"],
             question=opp["question"],
-            side="MM",  # Special marker for market maker
-            price=mm_bid,  # Entry at our bid
+            side="MM",
+            price=entry_price,
             amount=buy_amount,
             reason=opp["reason"],
-            strategy="MARKET_MAKER"
+            strategy="MARKET_MAKER",
+            fee_pct=0.0,
         )
 
         if result["success"]:
@@ -1657,14 +2402,22 @@ class TradingEngine:
             pos["mm_bid"] = mm_bid
             pos["mm_ask"] = mm_ask
             pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
-            pos["mm_target_profit"] = CONFIG["mm_target_profit"]
+            pos["mm_target_profit"] = ai_spread
+            pos["sector"] = opp.get("sector", "other")
+            pos["ai_score"] = opp.get("ai_score", 0)
+            # Store token_id for WS price feed
+            token_id = opp.get("token_id_yes")
+            if token_id:
+                pos["token_id"] = token_id
+                await self._ws_subscribe_position(token_id)
             self.portfolio._save()
 
-            expected_profit = buy_amount * CONFIG["mm_target_profit"]
+            expected_profit = buy_amount * ai_spread
             print(f"[MM] POSITION OPENED @ ${mm_bid:.3f}")
             print(f"     Market: {opp['question'][:50]}...")
-            print(f"     Target Exit: ${mm_ask:.3f} (+{CONFIG['mm_target_profit']:.1%})")
+            print(f"     Target Exit: ${mm_ask:.3f} (+{ai_spread:.1%})")
             print(f"     Expected Profit: ${expected_profit:.2f}")
+            print(f"     Sector: {opp.get('sector', 'other')} | AI: {opp.get('ai_score', 'N/A')}/10")
             print(f"     Volume: ${opp.get('volume_24h', 0)/1000:.0f}k/24h")
 
     async def _execute_binance_arb(self, opp: dict, amount: float):
@@ -1686,7 +2439,8 @@ class TradingEngine:
             print(f"     Edge: {edge:+.1f}% | BTC: ${binance_price:,.0f}")
             return
 
-        # SIMULATION: Execute the trade
+        # SIMULATION: Execute the trade (taker entry)
+        entry_fee = polymarket_taker_fee(price)
         result = self.portfolio.buy(
             condition_id=opp["condition_id"],
             question=opp["question"],
@@ -1694,7 +2448,8 @@ class TradingEngine:
             price=price,
             amount=amount,
             reason=opp["reason"],
-            strategy="BINANCE_ARB"
+            strategy="BINANCE_ARB",
+            fee_pct=entry_fee,
         )
 
         if result["success"]:
@@ -1703,43 +2458,177 @@ class TradingEngine:
             print(f"     Edge: {edge:+.1f}% | Binance: ${binance_price:,.0f} → Target: ${target_price:,.0f}")
             print(f"     Amount: ${amount:.2f} | Confidence: {opp.get('confidence', 0):.0%}")
 
+    async def _ai_deep_screen(self, opp: dict) -> Optional[dict]:
+        """Phase 2: AI deep screen with news context for MM and MR candidates."""
+        if not self.gemini:
+            return None
+
+        # Fetch recent news headlines for context
+        headlines = []
+        try:
+            articles = await self.news_intel.fetch_headlines(opp["question"], max_results=3)
+            headlines = [a["title"] for a in articles if a.get("title")]
+        except Exception as e:
+            print(f"[AI] News fetch error: {e}")
+
+        # Deep screen with full market context
+        try:
+            result = await self.gemini.deep_screen_market(
+                question=opp["question"],
+                price=opp.get("price", 0),
+                end_date=opp.get("end_date", ""),
+                volume_24h=opp.get("volume_24h", 0),
+                spread_pct=opp.get("spread_pct", 0),
+                liquidity=opp.get("liquidity", 0),
+                best_bid=opp.get("best_bid", 0),
+                best_ask=opp.get("best_ask", 0),
+                news_headlines=headlines,
+                days_to_resolve=opp.get("days_to_resolve", 0),
+                condition_id=opp.get("condition_id", ""),
+            )
+            cached_tag = " (cached)" if result.get("cached") else ""
+            score = result.get("quality_score", 0)
+            sector = result.get("sector", "other")
+            spread = result.get("recommended_spread_pct", 0.02)
+            print(f"[AI] {opp['question'][:50]}... → {score}/10 [{sector}] spread={spread:.1%}{cached_tag}")
+            return result
+        except Exception as e:
+            print(f"[AI] Screen error: {e}")
+            return None
+
+    def _check_portfolio_concentration(self, sector: str, condition_id: str) -> bool:
+        """Phase 3: Check if adding this position would over-concentrate the portfolio."""
+        # Rule 1: No duplicate markets
+        if condition_id in self.portfolio.positions:
+            return False
+
+        # Rule 2: Max 2 positions in same sector
+        sector_count = 0
+        sector_value = 0.0
+        total_value = self.portfolio.balance
+        for pos in self.portfolio.positions.values():
+            total_value += pos.get("cost_basis", 0)
+            if pos.get("sector", "other") == sector:
+                sector_count += 1
+                sector_value += pos.get("cost_basis", 0)
+
+        if sector_count >= 2:
+            print(f"[DIVERSIFY] Skipping: already {sector_count} positions in '{sector}'")
+            return False
+
+        # Rule 3: Max 40% of portfolio in any one sector
+        if total_value > 0 and sector_value / total_value > 0.40:
+            print(f"[DIVERSIFY] Skipping: '{sector}' already {sector_value/total_value:.0%} of portfolio")
+            return False
+
+        return True
+
+    def _portfolio_select(self, screened: list) -> list:
+        """Phase 3: Portfolio-aware selection — diversify and rank by AI score."""
+        selected = []
+        for opp in screened:
+            if opp["strategy"] == "MARKET_MAKER":
+                sector = opp.get("sector", "other")
+                if not self._check_portfolio_concentration(sector, opp["condition_id"]):
+                    continue
+            selected.append(opp)
+
+        # Sort MM opportunities by AI score (higher = better), others keep their order
+        selected.sort(
+            key=lambda x: x.get("ai_score", x.get("annualized_return", x.get("confidence", 0))),
+            reverse=True
+        )
+        return selected
+
     async def run_cycle(self):
         """Run one trading cycle."""
         print(f"\n{'='*60}")
         print(f"  CYCLE @ {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*60}")
 
-        # 1. Check exits on existing positions
+        # 1. Check exits on existing positions (EVERY cycle — 60s)
         if self.portfolio.positions:
             print(f"\n[POSITIONS] Checking {len(self.portfolio.positions)} open positions...")
             await self.check_exits()
 
-        # 2. Scan for new opportunities
-        print(f"\n[SCANNER] Scanning markets...")
-        markets = await self.scanner.get_active_markets()
-        print(f"[SCANNER] Found {len(markets)} liquid markets")
+        # 2. Scan for new opportunities (only every scan_interval — 10 min)
+        now = datetime.now(timezone.utc)
+        scan_interval = CONFIG.get("scan_interval", 600)
+        should_scan = (
+            self._last_scan_time is None
+            or (now - self._last_scan_time).total_seconds() >= scan_interval
+        )
 
-        # Fetch Binance prices for crypto arbitrage
-        binance_prices = await self.scanner.get_binance_prices()
-        if binance_prices:
-            btc = binance_prices.get("BTCUSDT", 0)
-            eth = binance_prices.get("ETHUSDT", 0)
-            if btc > 0:
-                print(f"[BINANCE] BTC: ${btc:,.0f} | ETH: ${eth:,.0f}")
+        if should_scan:
+            self._last_scan_time = now
+            print(f"\n[SCANNER] Scanning markets...")
+            markets = await self.scanner.get_active_markets()
+            print(f"[SCANNER] Found {len(markets)} liquid markets")
 
-        opportunities = self.scanner.find_opportunities(markets, binance_prices)
-        print(f"[SCANNER] Identified {len(opportunities)} opportunities")
+            # Fetch Binance prices for crypto arbitrage
+            binance_prices = await self.scanner.get_binance_prices()
+            if binance_prices:
+                btc = binance_prices.get("BTCUSDT", 0)
+                eth = binance_prices.get("ETHUSDT", 0)
+                if btc > 0:
+                    print(f"[BINANCE] BTC: ${btc:,.0f} | ETH: ${eth:,.0f}")
 
-        # 2.5. Log market snapshot (real bid/ask/volume for future backtesting)
-        self._log_snapshot(markets, binance_prices)
+            # === PHASE 1: DISCOVERY (heuristic filter, no AI) ===
+            opportunities = self.scanner.find_opportunities(markets, binance_prices)
 
-        # 3. Evaluate and execute (try more strategies in parallel)
-        for opp in opportunities[:5]:  # Evaluate top 5 to test more strategies
-            if await self.evaluate_opportunity(opp):
-                await self.execute_trade(opp)
-                await asyncio.sleep(1)  # Rate limit
+            # NEG_RISK_ARB: Fetch multi-outcome events and find arbitrage
+            negrisk_events = await self.scanner.fetch_negrisk_events()
+            negrisk_opps = self.scanner.find_negrisk_opportunities(negrisk_events)
+            if negrisk_opps:
+                print(f"[NEGRISK] Scanned {len(negrisk_events)} events → {len(negrisk_opps)} arb opportunities")
+                opportunities.extend(negrisk_opps)
 
-        # 4. Print summary
+            print(f"[SCANNER] Identified {len(opportunities)} opportunities")
+
+            # Log market snapshot for future backtesting
+            self._log_snapshot(markets, binance_prices)
+
+            # === PHASE 2: AI DEEP SCREEN (Gemini + news, cached 1hr) ===
+            ai_screened_strategies = {"MARKET_MAKER", "MEAN_REVERSION"}
+            screened = []
+            for opp in opportunities:
+                if opp["strategy"] in ai_screened_strategies and CONFIG.get("mm_ai_screen"):
+                    screen = await self._ai_deep_screen(opp)
+                    if screen and screen.get("approved") and screen.get("quality_score", 0) >= 6:
+                        opp["ai_score"] = screen["quality_score"]
+                        opp["ai_spread"] = screen.get("recommended_spread_pct", 0.02)
+                        opp["sector"] = screen.get("sector", "other")
+                        opp["catalyst_expected"] = screen.get("catalyst_expected", False)
+                        screened.append(opp)
+                    elif screen:
+                        score = screen.get("quality_score", 0)
+                        print(f"[AI] REJECTED ({score}/10): {opp['question'][:50]}... → {screen.get('reason', '')}")
+                else:
+                    screened.append(opp)  # Other strategies pass through
+
+            # === PHASE 3: PORTFOLIO-AWARE SELECTION ===
+            selected = self._portfolio_select(screened)
+            mm_count = sum(1 for o in selected if o["strategy"] == "MARKET_MAKER")
+            print(f"[PIPELINE] Phase 1→{len(opportunities)} → Phase 2→{len(screened)} → Phase 3→{len(selected)} (MM: {mm_count})")
+
+            # === PHASE 4: EXECUTE (with AI-recommended spread) ===
+            # Prioritize active strategies (MM) over hold-and-wait strategies
+            # Cap at 3 new entries per cycle — preserves capital for better opportunities
+            active_strats = [o for o in selected if o["strategy"] in ("MARKET_MAKER", "NEG_RISK_ARB")]
+            hold_strats = [o for o in selected if o["strategy"] not in ("MARKET_MAKER", "NEG_RISK_ARB")]
+            ordered = active_strats + hold_strats
+            executed = 0
+            for opp in ordered:
+                if executed >= 3:  # Max 3 new entries per cycle — pace capital deployment
+                    break
+                if await self.evaluate_opportunity(opp):
+                    await self.execute_trade(opp)
+                    executed += 1
+                    await asyncio.sleep(1)  # Rate limit
+        else:
+            print(f"\n[SCANNER] Exit-check only (next scan in {scan_interval - (now - self._last_scan_time).total_seconds():.0f}s)")
+
+        # Print summary
         summary = self.portfolio.get_summary()
         print(f"\n[PORTFOLIO]")
         print(f"  Balance: ${summary['balance']:.2f}")
@@ -1748,8 +2637,24 @@ class TradingEngine:
         print(f"  Win Rate: {summary['win_rate']:.1f}%")
         print(f"  ROI: {summary['roi_pct']:+.1f}%")
 
-        # 5. Strategy A/B report (every cycle)
+        # Strategy A/B report
         print(f"\n{self.portfolio.get_strategy_report()}")
+
+        # Write heartbeat for external monitoring (watchdog, alerter)
+        try:
+            heartbeat = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "positions": len(self.portfolio.positions),
+                "balance": round(self.portfolio.balance, 2),
+                "pnl": round(self.portfolio.metrics.get("total_pnl", 0), 2),
+                "trades": self.portfolio.metrics.get("total_trades", 0),
+                "win_rate": round(summary.get("win_rate", 0), 1),
+            }
+            heartbeat_path = Path(__file__).parent / "data" / ".heartbeat.json"
+            with open(heartbeat_path, "w") as f:
+                json.dump(heartbeat, f)
+        except Exception:
+            pass  # Never let monitoring break trading
 
     def _log_snapshot(self, markets: list, binance_prices: dict):
         """Append market snapshot to daily NDJSON file for future backtesting."""
@@ -1766,7 +2671,7 @@ class TradingEngine:
                         "bid": float(m.get("bestBid") or 0),
                         "ask": float(m.get("bestAsk") or 0),
                         "vol24h": float(m.get("volume24hr") or 0),
-                        "vol1h": float(m.get("volume1hr") or 0),
+                        "chg1h": float(m.get("oneHourPriceChange") or 0),
                         "liq": float(m.get("liquidityNum") or 0),
                         "chg24h": float(m.get("oneDayPriceChange") or 0),
                         "end": m.get("endDate", ""),
@@ -1807,19 +2712,31 @@ class TradingEngine:
 
         self.running = True
 
+        # Start WebSocket listener if configured
+        await self._ws_start()
+
         try:
             while self.running:
                 # Check kill switch in live mode
                 if self.live and self.safety.check_kill_switch():
                     print("[SHUTDOWN] Kill switch detected!")
                     break
+                # WS health check — reconnect if stale
+                await self._ws_health_check()
                 await self.run_cycle()
-                print(f"\n[SLEEP] Next scan in {CONFIG['scan_interval']} seconds...")
-                await asyncio.sleep(CONFIG["scan_interval"])
+                interval = CONFIG.get("exit_check_interval", 60)
+                print(f"\n[SLEEP] Next check in {interval}s...")
+                await asyncio.sleep(interval)
         except KeyboardInterrupt:
             print("\n[SHUTDOWN] Stopping gracefully...")
         finally:
             self.running = False
+
+            # Close WebSocket
+            if self.ws:
+                await self.ws.close()
+            if self._ws_task and not self._ws_task.done():
+                self._ws_task.cancel()
 
             # Cancel all open orders in live mode
             if self.live and self.executor and self.executor._initialized:

@@ -1,0 +1,15 @@
+.git
+.agent
+.claude
+__pycache__
+*.pyc
+.pytest_cache
+.venv_local
+*.egg-info
+sovereign_hive/data/*.json
+sovereign_hive/logs/*.log
+sovereign_hive/data/snapshots/
+infra/
+articles/
+py_clob_client_mock/
+.env

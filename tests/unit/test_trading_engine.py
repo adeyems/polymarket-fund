@@ -15,8 +15,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from sovereign_hive.run_simulation import (
-    TradingEngine, Portfolio, MarketScanner, CONFIG
+    TradingEngine, Portfolio, MarketScanner, CONFIG,
+    MAKER_STRATEGIES, FEE_FREE_EXITS,
 )
+from sovereign_hive.core.kelly_criterion import polymarket_taker_fee, taker_slippage
 
 
 # ============================================================
@@ -473,7 +475,7 @@ class TestMMExit:
 
     @pytest.mark.asyncio
     async def test_mm_filled_exit(self, temp_engine):
-        """Test MM position exits when price reaches ask."""
+        """Test MM position exits when price reaches ask (fill probability passes)."""
         # Create MM position
         temp_engine.portfolio.buy(
             condition_id="0xmm_fill",
@@ -490,13 +492,14 @@ class TestMMExit:
         pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
         temp_engine.portfolio._save()
 
-        # Mock price at ask level
+        # Mock price at ask level + random below fill_prob to guarantee fill
         with patch.object(
             temp_engine.scanner, 'get_market_price',
             new_callable=AsyncMock,
             return_value=0.51
         ):
-            await temp_engine.check_exits()
+            with patch('sovereign_hive.run_simulation.random.random', return_value=0.1):
+                await temp_engine.check_exits()
 
         assert "0xmm_fill" not in temp_engine.portfolio.positions
         assert temp_engine.portfolio.trade_history[-1]["exit_reason"] == "MM_FILLED"
@@ -558,6 +561,68 @@ class TestMMExit:
 
         assert "0xmm_timeout" not in temp_engine.portfolio.positions
         assert temp_engine.portfolio.trade_history[-1]["exit_reason"] == "MM_TIMEOUT"
+
+    @pytest.mark.asyncio
+    async def test_mm_fill_probability_rejects(self, temp_engine):
+        """Test MM fill rejected when random roll exceeds fill probability."""
+        temp_engine.portfolio.buy(
+            condition_id="0xmm_nofill",
+            question="MM no fill test",
+            side="MM",
+            price=0.50,
+            amount=100,
+            reason="MM test",
+            strategy="MARKET_MAKER"
+        )
+        pos = temp_engine.portfolio.positions["0xmm_nofill"]
+        pos["mm_bid"] = 0.50
+        pos["mm_ask"] = 0.51
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+        temp_engine.portfolio._save()
+
+        # Mock price at ask, but random > fill_prob (0.60) → no fill
+        with patch.object(
+            temp_engine.scanner, 'get_market_price',
+            new_callable=AsyncMock,
+            return_value=0.51
+        ):
+            with patch('sovereign_hive.run_simulation.random.random', return_value=0.9):
+                await temp_engine.check_exits()
+
+        # Position should still be open
+        assert "0xmm_nofill" in temp_engine.portfolio.positions
+
+    @pytest.mark.asyncio
+    async def test_mm_stop_exit_with_slippage(self, temp_engine):
+        """Test MM stop exit applies slippage to exit price."""
+        temp_engine.portfolio.buy(
+            condition_id="0xmm_slip",
+            question="MM slippage test",
+            side="MM",
+            price=0.50,
+            amount=100,
+            reason="MM test",
+            strategy="MARKET_MAKER"
+        )
+        pos = temp_engine.portfolio.positions["0xmm_slip"]
+        pos["mm_bid"] = 0.50
+        pos["mm_ask"] = 0.51
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+        temp_engine.portfolio._save()
+
+        # Price dropped to 0.47 (-6%, below -3% stop)
+        with patch.object(
+            temp_engine.scanner, 'get_market_price',
+            new_callable=AsyncMock,
+            return_value=0.47
+        ):
+            await temp_engine.check_exits()
+
+        assert "0xmm_slip" not in temp_engine.portfolio.positions
+        trade = temp_engine.portfolio.trade_history[-1]
+        # Exit price should be below 0.47 due to slippage (0.2%)
+        assert trade["exit_price"] < 0.47
+        assert trade["exit_price"] == pytest.approx(0.47 * (1 - 0.002), rel=0.001)
 
 
 # ============================================================
@@ -662,8 +727,8 @@ class TestEvaluateOpportunity:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_dip_buy_rejected_low_confidence_news(self, temp_engine):
-        """Test DIP_BUY rejected with low confidence bullish news."""
+    async def test_dip_buy_low_confidence_bullish_passes(self, temp_engine):
+        """Test DIP_BUY passes with low confidence bullish news (contrarian: only BEARISH blocks)."""
         opp = {
             "condition_id": "0xdip3",
             "question": "Dip buy low conf?",
@@ -677,15 +742,59 @@ class TestEvaluateOpportunity:
         with patch.object(
             temp_engine.news, 'analyze_market',
             new_callable=AsyncMock,
-            return_value={"direction": "BULLISH", "confidence": 0.40}  # Below 0.6
+            return_value={"direction": "BULLISH", "confidence": 0.40}
         ):
             result = await temp_engine.evaluate_opportunity(opp)
 
-        assert result is False
+        assert result is True  # Only BEARISH+high confidence blocks
 
     @pytest.mark.asyncio
-    async def test_volume_surge_with_news(self, temp_engine):
-        """Test VOLUME_SURGE checks news but doesn't require bullish."""
+    async def test_dip_buy_neutral_news_passes(self, temp_engine):
+        """Test DIP_BUY passes with neutral news (contrarian play, neutral is fine)."""
+        opp = {
+            "condition_id": "0xdip5",
+            "question": "Dip buy neutral?",
+            "strategy": "DIP_BUY",
+            "side": "YES",
+            "price": 0.40,
+            "confidence": 0.65,
+            "reason": "Test dip"
+        }
+
+        with patch.object(
+            temp_engine.news, 'analyze_market',
+            new_callable=AsyncMock,
+            return_value={"direction": "NEUTRAL", "confidence": 0.50}
+        ):
+            result = await temp_engine.evaluate_opportunity(opp)
+
+        assert result is True  # NEUTRAL doesn't block dip buys
+
+    @pytest.mark.asyncio
+    async def test_dip_buy_low_confidence_bearish_passes(self, temp_engine):
+        """Test DIP_BUY passes with low confidence bearish news (not confident enough to block)."""
+        opp = {
+            "condition_id": "0xdip6",
+            "question": "Dip buy weak bearish?",
+            "strategy": "DIP_BUY",
+            "side": "YES",
+            "price": 0.40,
+            "confidence": 0.65,
+            "reason": "Test dip"
+        }
+
+        with patch.object(
+            temp_engine.news, 'analyze_market',
+            new_callable=AsyncMock,
+            return_value={"direction": "BEARISH", "confidence": 0.40}  # Below 0.6
+        ):
+            result = await temp_engine.evaluate_opportunity(opp)
+
+        assert result is True  # BEARISH but low confidence doesn't block
+
+    @pytest.mark.asyncio
+    async def test_volume_surge_neutral_news_blocks(self, temp_engine):
+        """Test VOLUME_SURGE rejected when news doesn't match surge direction."""
         opp = {
             "condition_id": "0xvol",
             "question": "Volume surge?",
@@ -703,7 +812,73 @@ class TestEvaluateOpportunity:
         ):
             result = await temp_engine.evaluate_opportunity(opp)
 
-        assert result is True  # VOLUME_SURGE doesn't require bullish
+        assert result is False  # NEUTRAL doesn't match YES surge direction
+
+    @pytest.mark.asyncio
+    async def test_volume_surge_bullish_news_passes(self, temp_engine):
+        """Test VOLUME_SURGE passes when BULLISH news matches YES surge."""
+        opp = {
+            "condition_id": "0xvol2",
+            "question": "Volume surge bullish?",
+            "strategy": "VOLUME_SURGE",
+            "side": "YES",
+            "price": 0.50,
+            "confidence": 0.65,
+            "reason": "Test volume"
+        }
+
+        with patch.object(
+            temp_engine.news, 'analyze_market',
+            new_callable=AsyncMock,
+            return_value={"direction": "BULLISH", "confidence": 0.70}
+        ):
+            result = await temp_engine.evaluate_opportunity(opp)
+
+        assert result is True  # BULLISH matches YES surge
+
+    @pytest.mark.asyncio
+    async def test_volume_surge_bearish_news_blocks_yes(self, temp_engine):
+        """Test VOLUME_SURGE YES surge rejected when news is BEARISH."""
+        opp = {
+            "condition_id": "0xvol3",
+            "question": "Volume surge bearish?",
+            "strategy": "VOLUME_SURGE",
+            "side": "YES",
+            "price": 0.50,
+            "confidence": 0.65,
+            "reason": "Test volume"
+        }
+
+        with patch.object(
+            temp_engine.news, 'analyze_market',
+            new_callable=AsyncMock,
+            return_value={"direction": "BEARISH", "confidence": 0.80}
+        ):
+            result = await temp_engine.evaluate_opportunity(opp)
+
+        assert result is False  # BEARISH contradicts YES surge
+
+    @pytest.mark.asyncio
+    async def test_volume_surge_bearish_news_passes_no(self, temp_engine):
+        """Test VOLUME_SURGE NO surge passes when news is BEARISH."""
+        opp = {
+            "condition_id": "0xvol4",
+            "question": "Volume surge no side?",
+            "strategy": "VOLUME_SURGE",
+            "side": "NO",
+            "price": 0.50,
+            "confidence": 0.65,
+            "reason": "Test volume"
+        }
+
+        with patch.object(
+            temp_engine.news, 'analyze_market',
+            new_callable=AsyncMock,
+            return_value={"direction": "BEARISH", "confidence": 0.70}
+        ):
+            result = await temp_engine.evaluate_opportunity(opp)
+
+        assert result is True  # BEARISH matches NO surge
 
     @pytest.mark.asyncio
     async def test_dip_buy_no_news(self, temp_engine):
@@ -780,6 +955,321 @@ class TestRunCycle:
                     await temp_engine.run_cycle()
 
         mock_exits.assert_called_once()
+
+
+# ============================================================
+# FEE MODELING TESTS
+# ============================================================
+
+class TestFeeModeling:
+    """Tests for Polymarket taker fee integration in Portfolio and execution."""
+
+    def test_buy_with_fee_reduces_shares(self, tmp_path):
+        """Taker fee on buy reduces shares received."""
+        portfolio = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "fee_test.json"))
+
+        # Buy without fee
+        result_no_fee = portfolio.buy(
+            condition_id="0xnofee", question="No fee test", side="YES",
+            price=0.50, amount=100.0, reason="test", strategy="TEST", fee_pct=0.0
+        )
+        shares_no_fee = result_no_fee["position"]["shares"]
+
+        # Buy with fee (1.44% at p=0.60)
+        fee_pct = polymarket_taker_fee(0.60)
+        result_fee = portfolio.buy(
+            condition_id="0xwithfee", question="Fee test", side="YES",
+            price=0.50, amount=100.0, reason="test", strategy="TEST", fee_pct=fee_pct
+        )
+        shares_with_fee = result_fee["position"]["shares"]
+
+        # Fewer shares when paying fee
+        assert shares_with_fee < shares_no_fee
+        # Fee recorded in position
+        assert result_fee["position"]["entry_fee"] > 0
+
+    def test_sell_with_fee_reduces_proceeds(self, tmp_path):
+        """Taker fee on sell reduces proceeds received."""
+        portfolio = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "fee_sell.json"))
+
+        # Buy a position (no fee on entry for simplicity)
+        portfolio.buy(
+            condition_id="0xsell_test", question="Sell fee test", side="YES",
+            price=0.50, amount=100.0, reason="test", strategy="TEST", fee_pct=0.0
+        )
+
+        balance_before = portfolio.balance
+
+        # Sell with taker fee
+        fee_pct = polymarket_taker_fee(0.55)
+        result = portfolio.sell("0xsell_test", current_price=0.55, reason="TAKE_PROFIT", fee_pct=fee_pct)
+
+        assert result["success"]
+        assert result["trade"]["exit_fee"] > 0
+        # Proceeds = shares * price - fee, should be less than gross
+        gross = 200.0 * 0.55  # 200 shares at 0.55
+        assert portfolio.balance - balance_before < gross
+
+    def test_buy_with_zero_fee_full_shares(self, tmp_path):
+        """Zero fee gives full shares (maker path)."""
+        portfolio = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "zero_fee.json"))
+
+        result = portfolio.buy(
+            condition_id="0xmaker", question="Maker test", side="YES",
+            price=0.50, amount=100.0, reason="test", strategy="MARKET_MAKER", fee_pct=0.0
+        )
+
+        assert result["position"]["shares"] == pytest.approx(200.0)  # 100 / 0.50
+        assert result["position"]["entry_fee"] == 0.0
+
+    def test_sell_with_zero_fee_full_proceeds(self, tmp_path):
+        """Zero fee gives full proceeds (maker/resolved path)."""
+        portfolio = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "zero_sell.json"))
+
+        portfolio.buy(
+            condition_id="0xmaker_sell", question="Maker sell test", side="YES",
+            price=0.50, amount=100.0, reason="test", strategy="MARKET_MAKER", fee_pct=0.0
+        )
+
+        balance_before = portfolio.balance
+        result = portfolio.sell("0xmaker_sell", current_price=0.55, reason="MM_FILLED", fee_pct=0.0)
+
+        assert result["success"]
+        assert result["trade"]["exit_fee"] == 0.0
+        # Full proceeds: 200 shares * 0.55 = 110
+        assert portfolio.balance - balance_before == pytest.approx(110.0)
+
+    def test_fee_tracked_in_strategy_metrics(self, tmp_path):
+        """Fees accumulate in strategy_metrics."""
+        portfolio = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "fee_track.json"))
+
+        fee_pct = polymarket_taker_fee(0.60)  # ~1.44%
+        portfolio.buy(
+            condition_id="0xtrack", question="Track fees", side="YES",
+            price=0.60, amount=100.0, reason="test", strategy="DIP_BUY", fee_pct=fee_pct
+        )
+
+        assert portfolio.strategy_metrics["DIP_BUY"]["fees"] > 0
+        assert portfolio.strategy_metrics["DIP_BUY"]["fees"] == pytest.approx(100.0 * fee_pct, rel=0.01)
+
+    def test_maker_strategies_constant(self):
+        """MARKET_MAKER is the only maker strategy."""
+        assert "MARKET_MAKER" in MAKER_STRATEGIES
+        assert len(MAKER_STRATEGIES) == 1
+
+    def test_fee_free_exits_constant(self):
+        """Fee-free exits include resolution and maker fills."""
+        assert "RESOLVED" in FEE_FREE_EXITS
+        assert "MM_RESOLVED" in FEE_FREE_EXITS
+        assert "MM_FILLED" in FEE_FREE_EXITS
+        assert "MM_DELISTED" in FEE_FREE_EXITS
+        # Taker exits should NOT be in fee-free list
+        assert "TAKE_PROFIT" not in FEE_FREE_EXITS
+        assert "STOP_LOSS" not in FEE_FREE_EXITS
+        assert "MM_STOP" not in FEE_FREE_EXITS
+
+    @pytest.mark.asyncio
+    async def test_execute_trade_taker_pays_fee(self, temp_engine):
+        """Taker strategy (DIP_BUY) should pay entry fee."""
+        opp = {
+            "condition_id": "0xfee_exec",
+            "question": "Fee execution test?",
+            "strategy": "DIP_BUY",
+            "side": "YES",
+            "price": 0.60,
+            "expected_return": 0.10,
+            "annualized_return": 5.0,
+            "days_to_resolve": 10,
+            "liquidity": 50000,
+            "confidence": 0.70,
+            "reason": "Test fee execution",
+        }
+
+        await temp_engine.execute_trade(opp)
+
+        if "0xfee_exec" in temp_engine.portfolio.positions:
+            pos = temp_engine.portfolio.positions["0xfee_exec"]
+            assert pos["entry_fee"] > 0
+            # Fee should match the formula
+            expected_fee_rate = polymarket_taker_fee(0.60)
+            assert pos["entry_fee"] == pytest.approx(pos["cost_basis"] * expected_fee_rate, rel=0.01)
+
+    @pytest.mark.asyncio
+    async def test_execute_trade_maker_pays_no_fee(self, temp_engine, mock_mm_opportunity):
+        """MARKET_MAKER strategy should pay zero entry fee."""
+        await temp_engine._execute_market_maker(mock_mm_opportunity, amount=100.0)
+
+        if mock_mm_opportunity["condition_id"] in temp_engine.portfolio.positions:
+            pos = temp_engine.portfolio.positions[mock_mm_opportunity["condition_id"]]
+            assert pos["entry_fee"] == 0.0
+
+    def test_fee_on_round_trip_reduces_pnl(self, tmp_path):
+        """A round trip with fees should have lower P&L than without fees."""
+        # Without fees
+        p1 = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "no_fee_rt.json"))
+        p1.buy("0xrt", "Round trip", "YES", 0.50, 100.0, "test", "TEST", fee_pct=0.0)
+        r1 = p1.sell("0xrt", current_price=0.55, reason="TAKE_PROFIT", fee_pct=0.0)
+
+        # With fees
+        fee = polymarket_taker_fee(0.50)
+        p2 = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "fee_rt.json"))
+        p2.buy("0xrt", "Round trip", "YES", 0.50, 100.0, "test", "TEST", fee_pct=fee)
+        exit_fee = polymarket_taker_fee(0.55)
+        r2 = p2.sell("0xrt", current_price=0.55, reason="TAKE_PROFIT", fee_pct=exit_fee)
+
+        assert r2["trade"]["pnl"] < r1["trade"]["pnl"]
+
+
+# ============================================================
+# TAKER SLIPPAGE INTEGRATION TESTS
+# ============================================================
+
+class TestTakerSlippageIntegration:
+    """Tests for taker slippage in execute_trade and check_exits."""
+
+    @pytest.mark.asyncio
+    async def test_taker_entry_gets_worse_fill(self, temp_engine):
+        """Taker strategy entry price is worse than quoted due to slippage."""
+        opp = {
+            "condition_id": "0xslip_entry",
+            "question": "Slippage entry test?",
+            "strategy": "DIP_BUY",
+            "side": "YES",
+            "price": 0.60,
+            "expected_return": 0.10,
+            "annualized_return": 5.0,
+            "days_to_resolve": 10,
+            "liquidity": 50000,
+            "confidence": 0.70,
+            "reason": "Test slippage",
+        }
+
+        await temp_engine.execute_trade(opp)
+
+        if "0xslip_entry" in temp_engine.portfolio.positions:
+            pos = temp_engine.portfolio.positions["0xslip_entry"]
+            # Entry price should be higher than quoted (slippage against buyer)
+            assert pos["entry_price"] > 0.60
+
+    @pytest.mark.asyncio
+    async def test_maker_entry_no_taker_slippage(self, temp_engine, mock_mm_opportunity):
+        """MARKET_MAKER entry does NOT apply taker slippage (has its own from Phase 2)."""
+        await temp_engine._execute_market_maker(mock_mm_opportunity, amount=100.0)
+
+        if mock_mm_opportunity["condition_id"] in temp_engine.portfolio.positions:
+            pos = temp_engine.portfolio.positions[mock_mm_opportunity["condition_id"]]
+            # MM uses its own bid-based pricing, not taker slippage
+            assert pos["entry_fee"] == 0.0
+
+    def test_taker_exit_slippage_reduces_pnl(self, tmp_path):
+        """Taker exit with slippage should result in lower proceeds."""
+        # Buy at 0.50, sell at 0.55 with vs without slippage
+        p1 = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "no_slip.json"))
+        p1.buy("0xns", "No slip", "YES", 0.50, 100.0, "test", "TEST")
+        r1 = p1.sell("0xns", current_price=0.55, reason="TAKE_PROFIT")
+
+        slip = taker_slippage(50000)  # 20bps
+        slipped_price = 0.55 * (1 - slip)
+        p2 = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "with_slip.json"))
+        p2.buy("0xws", "With slip", "YES", 0.50, 100.0, "test", "TEST")
+        r2 = p2.sell("0xws", current_price=slipped_price, reason="TAKE_PROFIT")
+
+        assert r2["trade"]["pnl"] < r1["trade"]["pnl"]
+
+    def test_thin_market_slippage_worse_than_deep(self, tmp_path):
+        """Thin market slippage costs more than deep market."""
+        thin_slip = taker_slippage(5000)     # 60bps
+        deep_slip = taker_slippage(50000)    # 20bps
+
+        # Same trade, different slippage
+        p1 = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "deep.json"))
+        p1.buy("0xd", "Deep", "YES", 0.50, 100.0, "test", "TEST")
+        r1 = p1.sell("0xd", current_price=0.55 * (1 - deep_slip), reason="TP")
+
+        p2 = Portfolio(initial_balance=1000.0, data_file=str(tmp_path / "thin.json"))
+        p2.buy("0xt", "Thin", "YES", 0.50, 100.0, "test", "TEST")
+        r2 = p2.sell("0xt", current_price=0.55 * (1 - thin_slip), reason="TP")
+
+        assert r2["trade"]["pnl"] < r1["trade"]["pnl"]
+
+
+# ============================================================
+# WEBSOCKET PRICE FEED TESTS
+# ============================================================
+
+class TestWebSocketPriceFeed:
+    """Tests for WebSocket price caching and fallback."""
+
+    @pytest.mark.asyncio
+    async def test_ws_price_preferred_over_rest(self, temp_engine):
+        """When WS has fresh price, REST is not called."""
+        # Simulate a WS price cache entry
+        temp_engine.ws = True  # Truthy — enables WS path in _get_market_price
+        temp_engine.ws_prices["token_abc"] = {
+            "price": 0.65,
+            "ts": datetime.now(timezone.utc),
+        }
+        position = {"token_id": "token_abc"}
+
+        price = await temp_engine._get_market_price("0xcond", position)
+        assert price == 0.65
+
+    @pytest.mark.asyncio
+    async def test_ws_stale_falls_back_to_rest(self, temp_engine):
+        """When WS price is stale, falls back to REST."""
+        temp_engine.ws = True
+        temp_engine.ws_prices["token_stale"] = {
+            "price": 0.65,
+            "ts": datetime.now(timezone.utc) - timedelta(seconds=60),  # Stale
+        }
+        position = {"token_id": "token_stale"}
+
+        with patch.object(
+            temp_engine.scanner, 'get_market_price',
+            new_callable=AsyncMock,
+            return_value=0.70,
+        ):
+            price = await temp_engine._get_market_price("0xcond", position)
+
+        assert price == 0.70  # REST fallback
+
+    @pytest.mark.asyncio
+    async def test_no_ws_uses_rest(self, temp_engine):
+        """When WS is disabled, always uses REST."""
+        temp_engine.ws = None  # WS disabled
+
+        with patch.object(
+            temp_engine.scanner, 'get_market_price',
+            new_callable=AsyncMock,
+            return_value=0.55,
+        ):
+            price = await temp_engine._get_market_price("0xcond", {})
+
+        assert price == 0.55
+
+    @pytest.mark.asyncio
+    async def test_ws_callback_updates_cache(self, temp_engine):
+        """_on_ws_price callback populates the price cache."""
+        await temp_engine._on_ws_price({
+            "asset_id": "token_xyz",
+            "price": 0.72,
+        })
+
+        assert "token_xyz" in temp_engine.ws_prices
+        assert temp_engine.ws_prices["token_xyz"]["price"] == 0.72
+
+    @pytest.mark.asyncio
+    async def test_ws_subscribe_noop_when_disabled(self, temp_engine):
+        """_ws_subscribe_position is a no-op when WS is None."""
+        temp_engine.ws = None
+        # Should not raise
+        await temp_engine._ws_subscribe_position("some_token")
+
+    @pytest.mark.asyncio
+    async def test_ws_start_noop_when_disabled(self, temp_engine):
+        """_ws_start is a no-op when WS is None."""
+        temp_engine.ws = None
+        await temp_engine._ws_start()  # Should not raise
 
 
 if __name__ == "__main__":

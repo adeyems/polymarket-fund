@@ -1,0 +1,78 @@
+services:
+  trader:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: python -u sovereign_hive/run_simulation.py
+    env_file: .env
+    environment:
+      - ENABLE_VALIDATOR=true
+      - VALIDATOR_URL=http://validator:8100/validate
+    volumes:
+      - hive-data:/app/sovereign_hive/data
+      - hive-logs:/app/sovereign_hive/logs
+    depends_on:
+      validator:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  validator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: uvicorn sovereign_hive.agents_v2.validator:app --host 0.0.0.0 --port 8100
+    env_file: .env
+    volumes:
+      - hive-data:/app/sovereign_hive/data:ro
+    restart: unless-stopped
+    networks:
+      - hive-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  watchdog:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: python -u sovereign_hive/agents_v2/watchdog.py
+    env_file: .env
+    environment:
+      - WATCHDOG_INTERVAL=600
+      - HEARTBEAT_STALE_THRESHOLD=300
+      - COMPOSE_PROJECT=sovereign-hive
+    volumes:
+      - hive-data:/app/sovereign_hive/data:ro
+      - hive-logs:/app/sovereign_hive/logs:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+  alerter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: python -u sovereign_hive/agents_v2/alerter.py
+    env_file: .env
+    environment:
+      - ALERT_POLL_INTERVAL=60
+      - ALERT_SUMMARY_INTERVAL=21600
+      - ALERT_DAILY_REPORT_HOUR=8
+    volumes:
+      - hive-data:/app/sovereign_hive/data:ro
+    restart: unless-stopped
+    networks:
+      - hive-net
+
+volumes:
+  hive-data:
+  hive-logs:
+
+networks:
+  hive-net:
+    driver: bridge

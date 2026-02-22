@@ -88,6 +88,30 @@ class AsyncExecutor:
                     break
         return {"success": False, "error": last_error, "attempts": MAX_RETRIES + 1}
 
+    async def get_fee_rate_bps(self, token_id: str) -> int:
+        """
+        Query the current fee rate for a token.
+
+        Returns fee in basis points (e.g., 150 = 1.50%).
+        Maker (post-only) orders always have 0 fee, but the field must still
+        match what the CLOB expects in the signed payload.
+        Falls back to 0 on error (safe for maker/post-only orders).
+        """
+        if not self._initialized:
+            await self.init()
+
+        if not self.client:
+            return 0
+
+        try:
+            fee_bps = await asyncio.to_thread(
+                self.client.get_fee_rate_bps, token_id
+            )
+            return int(fee_bps)
+        except Exception as e:
+            print(f"[EXEC] get_fee_rate_bps error: {e} — defaulting to 0")
+            return 0
+
     async def execute_order(
         self,
         token_id: str,
@@ -113,18 +137,22 @@ class AsyncExecutor:
         if not self.client:
             return {"success": False, "error": "Client not initialized"}
 
+        # Query fee rate for this token (required in signed payload)
+        fee_bps = await self.get_fee_rate_bps(token_id)
+
         async def _do():
             from py_clob_client.clob_types import OrderArgs
             o_args = OrderArgs(
                 price=price,
                 size=size,
                 side=side,
-                token_id=token_id
+                token_id=token_id,
+                fee_rate_bps=fee_bps,
             )
             resp = await asyncio.to_thread(
                 self.client.create_and_post_order, o_args
             )
-            print(f"[EXEC] Order placed: {resp}")
+            print(f"[EXEC] Order placed (fee={fee_bps}bps): {resp}")
             return {
                 "success": resp.get("success", False),
                 "dry_run": False,
@@ -163,6 +191,9 @@ class AsyncExecutor:
         if not self.client:
             return {"success": False, "error": "Client not initialized"}
 
+        # Query fee rate (0 for post-only/maker, but must match CLOB expectation)
+        fee_bps = await self.get_fee_rate_bps(token_id)
+
         async def _do():
             from py_clob_client.clob_types import OrderArgs, OrderType
 
@@ -170,7 +201,8 @@ class AsyncExecutor:
                 price=price,
                 size=round(size, 2),
                 side=side,
-                token_id=token_id
+                token_id=token_id,
+                fee_rate_bps=fee_bps,
             )
 
             # Two-step: create (sign) then post with post_only flag
@@ -183,7 +215,7 @@ class AsyncExecutor:
 
             order_id = resp.get("orderID", "")
             success = bool(order_id)
-            print(f"[EXEC] {'POST-ONLY ' if post_only else ''}LIMIT {side} {size:.2f} @ ${price:.3f} -> {order_id[:16] if order_id else 'FAILED'}")
+            print(f"[EXEC] {'POST-ONLY ' if post_only else ''}LIMIT {side} {size:.2f} @ ${price:.3f} (fee={fee_bps}bps) -> {order_id[:16] if order_id else 'FAILED'}")
             return {
                 "success": success,
                 "orderID": order_id,

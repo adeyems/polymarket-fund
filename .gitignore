@@ -18,10 +18,11 @@ __pycache__/
 .agent/
 !.agent/README.md
 
-# Keys
+# Keys & sensitive scripts
 *.pem
 *.pub
 /tools/deploy_key*
+/tools/rescue_funds.py
 /infra/live/prod/quesquant-key*
 /infra/live/prod/sovereign-hive-key*
 !/infra/live/prod/quesquant-key-v2.pub

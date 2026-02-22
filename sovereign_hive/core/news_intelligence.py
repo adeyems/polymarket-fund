@@ -380,6 +380,82 @@ class NewsIntelligence:
         """Record an API request."""
         self._request_count += 1
 
+    @staticmethod
+    def extract_keywords(question: str) -> str:
+        """Extract search keywords from a market question.
+
+        Strips common filler words to build a tight NewsAPI query.
+        Example: "Will Bitcoin reach $100k by March?" -> "Bitcoin $100k"
+        """
+        stop_words = {
+            "will", "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "shall", "should",
+            "may", "might", "must", "can", "could", "would", "to", "of", "in",
+            "for", "on", "with", "at", "by", "from", "as", "into", "through",
+            "during", "before", "after", "above", "below", "between", "under",
+            "again", "further", "then", "once", "here", "there", "when", "where",
+            "why", "how", "all", "each", "every", "both", "few", "more", "most",
+            "other", "some", "such", "no", "nor", "not", "only", "own", "same",
+            "so", "than", "too", "very", "just", "because", "but", "and", "or",
+            "if", "while", "about", "up", "out", "off", "over", "this", "that",
+            "these", "those", "it", "its", "he", "she", "they", "them", "his",
+            "her", "their", "what", "which", "who", "whom", "we", "you", "your",
+            "our", "my", "me", "him", "us", "reach", "hit", "get", "go", "make",
+            "take", "come", "give", "say", "tell", "know", "think", "see", "want",
+            "use", "find", "become", "leave", "put", "end", "begin", "start",
+        }
+        # Remove punctuation except $ and %
+        cleaned = re.sub(r'[^\w\s$%]', ' ', question)
+        words = cleaned.split()
+        keywords = [w for w in words if w.lower() not in stop_words and len(w) > 1]
+        return " ".join(keywords[:5])  # Max 5 keywords
+
+    async def fetch_headlines(self, question: str, max_results: int = 3) -> List[dict]:
+        """Fetch recent news headlines relevant to a market question.
+
+        Returns list of {"title": str, "description": str, "source": str}.
+        Falls back to empty list on any error — never blocks trading.
+        """
+        if not self.api_key:
+            return []
+
+        if not self.can_make_request(daily_limit=80):
+            return []
+
+        query = self.extract_keywords(question)
+        if not query:
+            return []
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://newsapi.org/v2/everything"
+                params = {
+                    "q": query,
+                    "sortBy": "relevancy",
+                    "pageSize": max_results,
+                    "language": "en",
+                    "apiKey": self.api_key,
+                }
+                async with session.get(url, params=params, timeout=8) as resp:
+                    self.record_request()
+                    if resp.status == 200:
+                        data = await resp.json()
+                        articles = data.get("articles", [])
+                        return [
+                            {
+                                "title": a.get("title", "")[:200],
+                                "description": (a.get("description") or "")[:300],
+                                "source": (a.get("source") or {}).get("name", ""),
+                            }
+                            for a in articles[:max_results]
+                            if a.get("title")
+                        ]
+                    else:
+                        return []
+        except Exception as e:
+            print(f"[NEWS_INTEL] Headline fetch error: {e}")
+            return []
+
 
 # ============================================================
 # QUICK TEST

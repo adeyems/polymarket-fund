@@ -4,6 +4,7 @@ requests
 web3
 pytest
 fastapi
+uvicorn
 hypercorn
 boto3
 pydantic
@@ -11,3 +12,5 @@ py-cord
 aiohttp
 redis
 websockets
+docker
+pytest-cov
