@@ -1759,12 +1759,20 @@ class TradingEngine:
             original = status.get("original_size", 0)
 
             if original > 0 and matched >= original * 0.95:
-                # Buy order filled — reset mm_entry_time so sell timeout starts from fill, not buy post
+                # Buy order filled — get REAL fill price from CLOB trades
+                fill_price = await self.executor.get_fill_price(buy_order_id)
+                actual_fill = fill_price if fill_price else status.get("price", position["entry_price"])
                 position["live_state"] = "BUY_FILLED"
-                position["actual_fill_price"] = status.get("price", position["entry_price"])
+                position["actual_fill_price"] = actual_fill
+                # Update entry_price to match reality so P&L calculations are correct
+                if fill_price and abs(fill_price - position["entry_price"]) > 0.001:
+                    print(f"[MM-LIVE] BUY FILL PRICE: ${fill_price:.4f} (limit was ${position['entry_price']:.3f})")
+                    position["entry_price"] = actual_fill
+                    position["cost_basis"] = actual_fill * position["shares"]
+                # Reset timer so sell timeout starts from fill, not buy post
                 position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
                 self.portfolio._save()
-                print(f"[MM-LIVE] BUY FILLED: {position['question'][:40]}...")
+                print(f"[MM-LIVE] BUY FILLED @ ${actual_fill:.4f}: {position['question'][:40]}...")
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
                 # Timeout - cancel unfilled buy
                 await self.executor.cancel_order(buy_order_id)
@@ -1830,8 +1838,12 @@ class TradingEngine:
             original = status.get("original_size", 0)
 
             if original > 0 and matched >= original * 0.95:
-                # Sell order filled - PROFIT! Maker exit = zero fee
-                result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED", fee_pct=0.0)
+                # Sell order filled — get actual fill price from CLOB, not our limit price
+                fill_price = await self.executor.get_fill_price(sell_order_id)
+                actual_exit = fill_price if fill_price else mm_ask
+                if fill_price and abs(fill_price - mm_ask) > 0.001:
+                    print(f"[MM-LIVE] FILL PRICE: ${fill_price:.4f} (limit was ${mm_ask:.3f})")
+                result = self.portfolio.sell(condition_id, actual_exit, "MM_FILLED", fee_pct=0.0)
                 if result["success"]:
                     trade = result["trade"]
                     self.safety.record_trade_pnl(trade["pnl"])
@@ -1846,9 +1858,8 @@ class TradingEngine:
             pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
 
             if pnl_pct <= -0.03:
-                # STOP LOSS: Cancel sell, exit at best bid (with price floor)
+                # STOP LOSS: Cancel sell, post exit order, wait for CLOB confirmation
                 await self.executor.cancel_order(sell_order_id)
-                # Place aggressive sell at best bid
                 book = await self.executor.get_order_book(token_id)
                 bids = book.get("bids", [])
                 exit_price = bids[0][0] if bids else current_price * 0.99
@@ -1857,25 +1868,23 @@ class TradingEngine:
                 if exit_price < min_exit:
                     exit_price = min_exit
                     print(f"[MM-LIVE] STOP: bid ${bids[0][0] if bids else 0:.3f} below floor, using ${exit_price:.3f}")
-                await self.executor.post_limit_order(
+                result = await self.executor.post_limit_order(
                     token_id=token_id, side="SELL",
                     price=exit_price, size=round(position["shares"], 2),
                     post_only=False  # Allow taker to exit fast
                 )
-                live_stop_fee = polymarket_taker_fee(exit_price)
-                result = self.portfolio.sell(condition_id, exit_price, "MM_STOP", fee_pct=live_stop_fee)
-                if result["success"]:
-                    trade = result["trade"]
-                    self.safety.record_trade_pnl(trade["pnl"])
-                    # Record stop in circuit breaker tracker
-                    if condition_id not in self.stop_tracker:
-                        self.stop_tracker[condition_id] = []
-                    self.stop_tracker[condition_id].append(datetime.now(timezone.utc))
-                    self._save_stop_tracker()
-                    print(f"[MM-LIVE] STOP LOSS @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
+                exit_order_id = result.get("orderID", "")
+                if exit_order_id:
+                    # Don't record trade yet — wait for CLOB to confirm fill
+                    position["live_state"] = "EXIT_PENDING"
+                    position["exit_order_id"] = exit_order_id
+                    position["exit_reason"] = "MM_STOP"
+                    position["exit_limit_price"] = exit_price
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] STOP EXIT POSTED @ ${exit_price:.3f}, waiting for fill confirmation...")
 
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
-                # TIMEOUT: Cancel sell, exit at best bid (with price floor)
+                # TIMEOUT: Cancel sell, post exit order, wait for CLOB confirmation
                 await self.executor.cancel_order(sell_order_id)
                 book = await self.executor.get_order_book(token_id)
                 bids = book.get("bids", [])
@@ -1888,17 +1897,20 @@ class TradingEngine:
                     position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
                     self.portfolio._save()
                 else:
-                    await self.executor.post_limit_order(
+                    result = await self.executor.post_limit_order(
                         token_id=token_id, side="SELL",
                         price=exit_price, size=round(position["shares"], 2),
                         post_only=False
                     )
-                    live_timeout_fee = polymarket_taker_fee(exit_price)
-                    result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT", fee_pct=live_timeout_fee)
-                    if result["success"]:
-                        trade = result["trade"]
-                        self.safety.record_trade_pnl(trade["pnl"])
-                        print(f"[MM-LIVE] TIMEOUT @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
+                    exit_order_id = result.get("orderID", "")
+                    if exit_order_id:
+                        # Don't record trade yet — wait for CLOB to confirm fill
+                        position["live_state"] = "EXIT_PENDING"
+                        position["exit_order_id"] = exit_order_id
+                        position["exit_reason"] = "MM_TIMEOUT"
+                        position["exit_limit_price"] = exit_price
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] TIMEOUT EXIT POSTED @ ${exit_price:.3f}, waiting for fill confirmation...")
 
             elif status.get("status") in ("CANCELLED", "CANCELED"):
                 # Sell order cancelled externally - re-enter BUY_FILLED to repost
@@ -1906,6 +1918,54 @@ class TradingEngine:
                 position["sell_order_id"] = ""
                 self.portfolio._save()
                 print(f"[MM-LIVE] SELL CANCELLED externally, will repost next cycle")
+
+        elif live_state == "EXIT_PENDING":
+            # Waiting for CLOB to confirm exit order fill — then record with REAL price
+            exit_order_id = position.get("exit_order_id", "")
+            exit_reason = position.get("exit_reason", "MM_EXIT")
+            exit_limit_price = position.get("exit_limit_price", 0)
+
+            if not exit_order_id:
+                # No exit order — shouldn't happen, recover by going back to BUY_FILLED
+                position["live_state"] = "BUY_FILLED"
+                self.portfolio._save()
+                return
+
+            status = await self.executor.get_order_status(exit_order_id)
+            matched = status.get("size_matched", 0)
+            original = status.get("original_size", 0)
+
+            if original > 0 and matched >= original * 0.95:
+                # Exit order FILLED — get the REAL execution price from CLOB
+                fill_price = await self.executor.get_fill_price(exit_order_id)
+                actual_exit = fill_price if fill_price else exit_limit_price
+
+                if fill_price:
+                    print(f"[MM-LIVE] EXIT CONFIRMED: CLOB fill @ ${fill_price:.4f} (limit was ${exit_limit_price:.3f})")
+                else:
+                    print(f"[MM-LIVE] EXIT CONFIRMED: using limit price ${exit_limit_price:.3f} (CLOB trade data unavailable)")
+
+                # Now record the trade with the real price
+                fee_pct = polymarket_taker_fee(actual_exit) if exit_reason != "MM_FILLED" else 0.0
+                result = self.portfolio.sell(condition_id, actual_exit, exit_reason, fee_pct=fee_pct)
+                if result["success"]:
+                    trade = result["trade"]
+                    self.safety.record_trade_pnl(trade["pnl"])
+                    if exit_reason == "MM_STOP":
+                        if condition_id not in self.stop_tracker:
+                            self.stop_tracker[condition_id] = []
+                        self.stop_tracker[condition_id].append(datetime.now(timezone.utc))
+                        self._save_stop_tracker()
+                    print(f"[MM-LIVE] {exit_reason} @ ${actual_exit:.3f}: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
+
+            elif status.get("status") in ("CANCELLED", "CANCELED"):
+                # Exit order was cancelled — go back to BUY_FILLED to retry
+                position["live_state"] = "BUY_FILLED"
+                position.pop("exit_order_id", None)
+                position.pop("exit_reason", None)
+                position.pop("exit_limit_price", None)
+                self.portfolio._save()
+                print(f"[MM-LIVE] EXIT CANCELLED, will retry next cycle")
 
     def _load_stop_tracker(self):
         """Load stop tracker from disk (survives process restarts)."""

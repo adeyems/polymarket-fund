@@ -310,6 +310,54 @@ class AsyncExecutor:
             print(f"[EXEC] Cancel error: {e}")
             return False
 
+    async def get_fill_price(self, order_id: str) -> Optional[float]:
+        """
+        Get the actual execution price for a filled order from CLOB trade history.
+
+        The CLOB can give price improvement — a sell limit at $0.01 might fill at
+        $0.80 if there are bids at that level. This method returns the REAL price
+        the trade executed at, not the limit price we submitted.
+
+        Returns:
+            Actual fill price as float, or None if no trades found for this order.
+        """
+        if not self._initialized:
+            await self.init()
+
+        if not self.client:
+            return None
+
+        try:
+            trades = await asyncio.to_thread(self.client.get_trades)
+            # Find trades matching this order (as taker or via maker_orders)
+            total_size = 0.0
+            total_value = 0.0
+            for trade in trades:
+                taker_id = trade.get("taker_order_id", "")
+                # Match by full ID or prefix (order IDs can be truncated in logs)
+                if taker_id == order_id or taker_id.startswith(order_id):
+                    size = float(trade.get("size", 0))
+                    price = float(trade.get("price", 0))
+                    total_size += size
+                    total_value += size * price
+                    continue
+                # Also check if we were the maker in this trade
+                for maker in trade.get("maker_orders", []):
+                    if maker.get("order_id", "") == order_id or maker.get("order_id", "").startswith(order_id):
+                        size = float(maker.get("matched_amount", 0))
+                        price = float(maker.get("price", 0))
+                        total_size += size
+                        total_value += size * price
+
+            if total_size > 0:
+                avg_price = total_value / total_size
+                print(f"[EXEC] Fill price for {order_id[:16]}: ${avg_price:.4f} ({total_size:.2f} shares)")
+                return avg_price
+            return None
+        except Exception as e:
+            print(f"[EXEC] get_fill_price error: {e}")
+            return None
+
 
 # Singleton
 _executor = None
