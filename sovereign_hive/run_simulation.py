@@ -90,6 +90,7 @@ CONFIG = {
     # LIVE TRADING LIMITS (only used when --live flag is set)
     "live_max_order": 10,            # Max $10 per order (conservative for small accounts)
     "live_min_position": 5,          # Min $5 position (Polymarket allows ~$1 but gas makes <$5 wasteful)
+    "live_max_position_pct": 0.50,   # Allow 50% of balance per trade for small accounts (capped by live_max_order)
 
     # NEG_RISK ARBITRAGE CONFIG (multi-outcome event arbitrage)
     # Source: 42% of NegRisk events have probability sums != 1.0
@@ -2036,9 +2037,10 @@ class TradingEngine:
         # Calculate position size using Monte Carlo Cap 3 Half Kelly
         # Arb strategies (guaranteed profit) and MM (spread capture, high turnover) use fixed %
         if CONFIG.get("use_kelly", False) and opp["strategy"] not in ["DUAL_SIDE_ARB", "NEG_RISK_ARB", "MARKET_MAKER"]:
+            pos_pct = CONFIG.get("live_max_position_pct", 0.50) if self.live else CONFIG.get("kelly_max_position", 0.30)
             kelly = KellyCriterion(
                 kelly_fraction=CONFIG.get("kelly_fraction", 0.50),
-                max_position_pct=CONFIG.get("kelly_max_position", 0.30),
+                max_position_pct=pos_pct,
                 min_edge=CONFIG.get("kelly_min_edge", 0.02),
                 mc_validated=getattr(self, '_mc_validated', False),
             )
@@ -2052,10 +2054,12 @@ class TradingEngine:
                       f"Risk: {kelly_result.risk_level} | {emp_tag}")
             else:
                 # Fall back to fixed percentage if Kelly returns None (no edge)
-                max_amount = self.portfolio.balance * CONFIG["max_position_pct"]
+                fallback_pct = CONFIG.get("live_max_position_pct", 0.50) if self.live else CONFIG["max_position_pct"]
+                max_amount = self.portfolio.balance * fallback_pct
         else:
             # Fixed percentage for special strategies or when Kelly disabled
-            max_amount = self.portfolio.balance * CONFIG["max_position_pct"]
+            fallback_pct = CONFIG.get("live_max_position_pct", 0.50) if self.live else CONFIG["max_position_pct"]
+            max_amount = self.portfolio.balance * fallback_pct
 
         # REALISTIC CONSTRAINT: Can't buy more than 1% of market liquidity
         # This prevents unrealistic fills that wouldn't happen in real trading
