@@ -1759,9 +1759,10 @@ class TradingEngine:
             original = status.get("original_size", 0)
 
             if original > 0 and matched >= original * 0.95:
-                # Buy order filled
+                # Buy order filled — reset mm_entry_time so sell timeout starts from fill, not buy post
                 position["live_state"] = "BUY_FILLED"
                 position["actual_fill_price"] = status.get("price", position["entry_price"])
+                position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
                 self.portfolio._save()
                 print(f"[MM-LIVE] BUY FILLED: {position['question'][:40]}...")
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
@@ -1845,12 +1846,17 @@ class TradingEngine:
             pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
 
             if pnl_pct <= -0.03:
-                # STOP LOSS: Cancel sell, exit at best bid
+                # STOP LOSS: Cancel sell, exit at best bid (with price floor)
                 await self.executor.cancel_order(sell_order_id)
                 # Place aggressive sell at best bid
                 book = await self.executor.get_order_book(token_id)
                 bids = book.get("bids", [])
                 exit_price = bids[0][0] if bids else current_price * 0.99
+                # Safety floor: never sell below 50% of entry price
+                min_exit = position["entry_price"] * 0.50
+                if exit_price < min_exit:
+                    exit_price = min_exit
+                    print(f"[MM-LIVE] STOP: bid ${bids[0][0] if bids else 0:.3f} below floor, using ${exit_price:.3f}")
                 await self.executor.post_limit_order(
                     token_id=token_id, side="SELL",
                     price=exit_price, size=round(position["shares"], 2),
@@ -1869,22 +1875,30 @@ class TradingEngine:
                     print(f"[MM-LIVE] STOP LOSS @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
 
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
-                # TIMEOUT: Cancel sell, exit at best bid
+                # TIMEOUT: Cancel sell, exit at best bid (with price floor)
                 await self.executor.cancel_order(sell_order_id)
                 book = await self.executor.get_order_book(token_id)
                 bids = book.get("bids", [])
                 exit_price = bids[0][0] if bids else current_price * 0.99
-                await self.executor.post_limit_order(
-                    token_id=token_id, side="SELL",
-                    price=exit_price, size=round(position["shares"], 2),
-                    post_only=False
-                )
-                live_timeout_fee = polymarket_taker_fee(exit_price)
-                result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT", fee_pct=live_timeout_fee)
-                if result["success"]:
-                    trade = result["trade"]
-                    self.safety.record_trade_pnl(trade["pnl"])
-                    print(f"[MM-LIVE] TIMEOUT @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
+                # Safety floor: never sell below 50% of entry price (prevents fire-sale on thin books)
+                min_exit = position["entry_price"] * 0.50
+                if exit_price < min_exit:
+                    print(f"[MM-LIVE] TIMEOUT BLOCKED: best bid ${exit_price:.3f} below floor ${min_exit:.3f}, keeping sell at ${mm_ask:.3f}")
+                    # Don't fire-sale — repost original sell and wait for fill or stop-loss
+                    position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                    self.portfolio._save()
+                else:
+                    await self.executor.post_limit_order(
+                        token_id=token_id, side="SELL",
+                        price=exit_price, size=round(position["shares"], 2),
+                        post_only=False
+                    )
+                    live_timeout_fee = polymarket_taker_fee(exit_price)
+                    result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT", fee_pct=live_timeout_fee)
+                    if result["success"]:
+                        trade = result["trade"]
+                        self.safety.record_trade_pnl(trade["pnl"])
+                        print(f"[MM-LIVE] TIMEOUT @ ${exit_price:.3f}: ${trade['pnl']:+.2f}")
 
             elif status.get("status") in ("CANCELLED", "CANCELED"):
                 # Sell order cancelled externally - re-enter BUY_FILLED to repost
