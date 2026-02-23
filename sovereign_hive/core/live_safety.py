@@ -12,11 +12,11 @@ from datetime import datetime, timezone
 class LiveSafety:
     """Safety checks that must pass before any live order is placed."""
 
-    MAX_SINGLE_ORDER_USD = 200       # No single order > $200
+    MAX_SINGLE_ORDER_USD = 10        # No single order > $10 (conservative for $20 capital)
     MAX_TOTAL_EXPOSURE_PCT = 0.80    # Max 80% of portfolio in open positions
-    DAILY_LOSS_LIMIT_USD = 50        # Halt new orders if daily P&L < -$50
+    DAILY_LOSS_LIMIT_USD = 10        # Halt new orders if daily P&L < -$10
     BALANCE_BUFFER_PCT = 0.05        # Require 5% balance buffer above order amount
-    KILL_SWITCH_FILE = "/tmp/kill_sovereign_hive"
+    KILL_SWITCH_FILE = "/run/sovereign-hive/kill_switch"
 
     def __init__(self):
         self._daily_pnl = 0.0

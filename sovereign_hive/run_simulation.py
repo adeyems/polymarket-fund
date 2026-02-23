@@ -87,6 +87,10 @@ CONFIG = {
     "mm_fill_probability": 0.60,     # 60% chance of fill when price touches ask (sim only)
     "mm_slippage_bps": 20,           # 20 bps (0.2%) slippage on entry/exit prices (sim only)
 
+    # LIVE TRADING LIMITS (only used when --live flag is set)
+    "live_max_order": 10,            # Max $10 per order (conservative for small accounts)
+    "live_min_position": 5,          # Min $5 position (Polymarket allows ~$1 but gas makes <$5 wasteful)
+
     # NEG_RISK ARBITRAGE CONFIG (multi-outcome event arbitrage)
     # Source: 42% of NegRisk events have probability sums != 1.0
     # Top arbitrageur extracted $2M+ across 4,049 trades
@@ -399,6 +403,12 @@ class Portfolio:
 
     def get_strategy_report(self) -> str:
         """Get A/B test report for all strategies."""
+        # Count open positions per strategy
+        open_by_strategy = {}
+        for pos in self.positions.values():
+            s = pos.get("strategy", "UNKNOWN")
+            open_by_strategy[s] = open_by_strategy.get(s, 0) + 1
+
         lines = ["STRATEGY PERFORMANCE (A/B Test):"]
         lines.append("-" * 65)
         for strategy, metrics in self.strategy_metrics.items():
@@ -408,7 +418,9 @@ class Portfolio:
             fees = metrics.get("fees", 0.0)
             win_rate = (wins / trades * 100) if trades > 0 else 0
             fee_str = f" | Fees: ${fees:.2f}" if fees > 0 else ""
-            lines.append(f"  {strategy:15} | Trades: {trades:3} | Win: {win_rate:5.1f}% | P&L: ${pnl:+.2f}{fee_str}")
+            open_count = open_by_strategy.get(strategy, 0)
+            open_str = f" | Open: {open_count}" if open_count > 0 else ""
+            lines.append(f"  {strategy:15} | Trades: {trades:3} | Win: {win_rate:5.1f}% | P&L: ${pnl:+.2f}{fee_str}{open_str}")
         return "\n".join(lines)
 
 
@@ -2050,11 +2062,13 @@ class TradingEngine:
         liquidity = opp.get("liquidity", 10000)
         max_liquidity_amount = liquidity * 0.01  # Max 1% of liquidity
 
-        amount = min(max_amount, max_liquidity_amount, 200)  # Cap at $200 per trade
+        per_trade_cap = CONFIG.get("live_max_order", 10) if self.live else 200
+        amount = min(max_amount, max_liquidity_amount, per_trade_cap)
 
-        # Minimum position size
-        if amount < 50:
-            print(f"[TRADE] Skipping: Position too small (${amount:.2f} < $50 minimum)")
+        # Minimum position size (lower for live small accounts)
+        min_position = CONFIG.get("live_min_position", 5) if self.live else 50
+        if amount < min_position:
+            print(f"[TRADE] Skipping: Position too small (${amount:.2f} < ${min_position} minimum)")
             return
 
         # NEG_RISK_ARB: Multi-outcome arbitrage — buy/sell all outcomes

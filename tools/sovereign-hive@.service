@@ -7,22 +7,27 @@ Wants=network-online.target
 Type=simple
 User=ec2-user
 Group=ec2-user
-WorkingDirectory=/app/hft
-Environment="PATH=/app/hft/venv/bin:/usr/local/bin:/usr/bin"
+WorkingDirectory=/app/sovereign-hive
+Environment="PATH=/app/sovereign-hive/venv/bin:/usr/local/bin:/usr/bin"
 Environment="PYTHONUNBUFFERED=1"
 Environment="STRATEGY_FILTER=%i"
-EnvironmentFile=/app/hft/.env
-ExecStart=/app/hft/venv/bin/python3 sovereign_hive/run_simulation.py --live
+
+# Load secrets from Secrets Manager (in-memory only, not on disk)
+ExecStartPre=/app/sovereign-hive/load_secrets.sh
+EnvironmentFile=/run/sovereign-hive/env
+
+ExecStart=/app/sovereign-hive/venv/bin/python3 sovereign_hive/run_simulation.py --live
 Restart=always
 RestartSec=30
-StandardOutput=append:/var/log/quesquant/sovereign_hive_%i.log
-StandardError=append:/var/log/quesquant/sovereign_hive_%i_error.log
+
+StandardOutput=append:/var/log/sovereign-hive/%i.log
+StandardError=append:/var/log/sovereign-hive/%i_error.log
 
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/log/quesquant /app/hft /tmp
+ReadWritePaths=/var/log/sovereign-hive /app/sovereign-hive /tmp /run/sovereign-hive
 
 [Install]
 WantedBy=multi-user.target
