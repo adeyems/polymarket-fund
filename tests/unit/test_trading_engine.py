@@ -1272,5 +1272,553 @@ class TestWebSocketPriceFeed:
         await temp_engine._ws_start()  # Should not raise
 
 
+# ============================================================
+# LIVE MM STATE MACHINE: EXIT_PENDING
+# ============================================================
+
+class TestExitPendingState:
+    """Tests for EXIT_PENDING state in the live MM order state machine.
+
+    EXIT_PENDING is entered after a stop-loss or timeout posts an exit order.
+    The bot then polls the CLOB for fill confirmation before recording the trade
+    with the REAL execution price (not the limit price).
+    """
+
+    @pytest.fixture
+    def live_engine(self, tmp_path):
+        """Create a live-mode TradingEngine with mocked executor."""
+        portfolio_file = tmp_path / "test_portfolio.json"
+
+        with patch.object(Portfolio, '__init__', lambda self, **kwargs: None):
+            engine = TradingEngine(live=True)
+
+        engine.portfolio = Portfolio(
+            initial_balance=1000.0,
+            data_file=str(portfolio_file)
+        )
+        engine.scanner = MarketScanner()
+        engine.live = True
+        engine.running = False
+
+        # Mock executor
+        engine.executor = MagicMock()
+        engine.executor.get_order_status = AsyncMock()
+        engine.executor.get_fill_price = AsyncMock()
+        engine.executor.cancel_order = AsyncMock()
+        engine.executor.post_limit_order = AsyncMock()
+        engine.executor.get_order_book = AsyncMock()
+
+        # Mock safety
+        engine.safety = MagicMock()
+        engine.safety.record_trade_pnl = MagicMock()
+
+        # Clean stop tracker (don't load real data from disk)
+        engine.stop_tracker = {}
+        engine._stop_tracker_file = tmp_path / "stop_tracker.json"
+
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_exit_pending_filled_records_trade(self, live_engine):
+        """EXIT_PENDING with filled order records trade with real fill price."""
+        condition_id = "0xexit_test"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Test exit pending?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "EXIT_PENDING"
+        pos["exit_order_id"] = "exit-order-123"
+        pos["exit_reason"] = "MM_STOP"
+        pos["exit_limit_price"] = 0.75
+        pos["token_id"] = "token-xyz"
+        pos["mm_ask"] = 0.82
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+
+        # CLOB says order is fully matched
+        live_engine.executor.get_order_status.return_value = {
+            "status": "MATCHED",
+            "size_matched": 12.5,
+            "original_size": 12.5,
+        }
+        # Actual fill was at $0.78, not the $0.75 limit
+        live_engine.executor.get_fill_price.return_value = 0.78
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Position should be closed
+        assert condition_id not in live_engine.portfolio.positions
+        # Trade recorded
+        assert live_engine.portfolio.metrics["total_trades"] == 1
+
+    @pytest.mark.asyncio
+    async def test_exit_pending_uses_limit_when_no_fill_data(self, live_engine):
+        """Falls back to limit price when CLOB trade data is unavailable."""
+        condition_id = "0xexit_nofill"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Test fallback price?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "EXIT_PENDING"
+        pos["exit_order_id"] = "exit-order-456"
+        pos["exit_reason"] = "MM_TIMEOUT"
+        pos["exit_limit_price"] = 0.70
+        pos["token_id"] = "token-xyz"
+        pos["mm_ask"] = 0.82
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+
+        live_engine.executor.get_order_status.return_value = {
+            "status": "MATCHED",
+            "size_matched": 12.5,
+            "original_size": 12.5,
+        }
+        # No fill data available
+        live_engine.executor.get_fill_price.return_value = None
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        assert condition_id not in live_engine.portfolio.positions
+
+    @pytest.mark.asyncio
+    async def test_exit_pending_cancelled_retries(self, live_engine):
+        """Cancelled exit order returns to BUY_FILLED for retry."""
+        condition_id = "0xexit_cancel"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Test cancel recovery?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "EXIT_PENDING"
+        pos["exit_order_id"] = "exit-order-789"
+        pos["exit_reason"] = "MM_STOP"
+        pos["exit_limit_price"] = 0.75
+        pos["token_id"] = "token-xyz"
+        pos["mm_ask"] = 0.82
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+
+        # CLOB says order was cancelled (American spelling)
+        live_engine.executor.get_order_status.return_value = {
+            "status": "CANCELED",
+            "size_matched": 0,
+            "original_size": 12.5,
+        }
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should recover to BUY_FILLED for retry
+        assert pos["live_state"] == "BUY_FILLED"
+        assert "exit_order_id" not in pos
+        assert "exit_reason" not in pos
+
+    @pytest.mark.asyncio
+    async def test_exit_pending_no_order_id_recovers(self, live_engine):
+        """Missing exit_order_id recovers to BUY_FILLED."""
+        condition_id = "0xexit_noid"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Test no order ID?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "EXIT_PENDING"
+        pos["exit_order_id"] = ""  # Missing!
+        pos["token_id"] = "token-xyz"
+        pos["mm_ask"] = 0.82
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should recover to BUY_FILLED
+        assert pos["live_state"] == "BUY_FILLED"
+
+    @pytest.mark.asyncio
+    async def test_exit_pending_stop_records_in_tracker(self, live_engine):
+        """MM_STOP exit records in the stop tracker for circuit breaker."""
+        condition_id = "0xexit_stop"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Test stop tracker?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "EXIT_PENDING"
+        pos["exit_order_id"] = "exit-stop-001"
+        pos["exit_reason"] = "MM_STOP"
+        pos["exit_limit_price"] = 0.75
+        pos["token_id"] = "token-xyz"
+        pos["mm_ask"] = 0.82
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+
+        live_engine.executor.get_order_status.return_value = {
+            "status": "MATCHED",
+            "size_matched": 12.5,
+            "original_size": 12.5,
+        }
+        live_engine.executor.get_fill_price.return_value = 0.76
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Stop should be recorded in tracker
+        assert condition_id in live_engine.stop_tracker
+        assert len(live_engine.stop_tracker[condition_id]) == 1
+
+
+# ============================================================
+# FIRE-SALE PREVENTION TESTS
+# ============================================================
+
+class TestFireSalePrevention:
+    """Tests for the 50% price floor on MM exits.
+
+    When the best bid is below 50% of entry price, exits are BLOCKED
+    to prevent catastrophic fire-sale losses on thin order books.
+    """
+
+    @pytest.fixture
+    def live_engine(self, tmp_path):
+        """Create a live-mode TradingEngine for fire-sale tests."""
+        portfolio_file = tmp_path / "test_portfolio.json"
+
+        with patch.object(Portfolio, '__init__', lambda self, **kwargs: None):
+            engine = TradingEngine(live=True)
+
+        engine.portfolio = Portfolio(
+            initial_balance=1000.0,
+            data_file=str(portfolio_file)
+        )
+        engine.scanner = MarketScanner()
+        engine.live = True
+        engine.running = False
+
+        engine.executor = MagicMock()
+        engine.executor.get_order_status = AsyncMock()
+        engine.executor.get_fill_price = AsyncMock()
+        engine.executor.cancel_order = AsyncMock(return_value=True)
+        engine.executor.post_limit_order = AsyncMock()
+        engine.executor.get_order_book = AsyncMock()
+
+        engine.safety = MagicMock()
+        engine.safety.record_trade_pnl = MagicMock()
+
+        return engine
+
+    def _make_sell_pending_position(self, engine, condition_id, entry_price=0.80, hold_hours=5):
+        """Helper: create a SELL_PENDING position that's past timeout."""
+        engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Fire-sale test market?",
+            side="MM",
+            price=entry_price,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = engine.portfolio.positions[condition_id]
+        pos["live_state"] = "SELL_PENDING"
+        pos["sell_order_id"] = "sell-order-123"
+        pos["token_id"] = "token-fire"
+        pos["mm_ask"] = entry_price * 1.02
+        # Set entry time in the past
+        entry_time = datetime.now(timezone.utc) - timedelta(hours=hold_hours)
+        pos["mm_entry_time"] = entry_time.isoformat()
+        return pos
+
+    @pytest.mark.asyncio
+    async def test_stop_loss_applies_price_floor(self, live_engine):
+        """Stop loss uses 50% floor when best bid is below it."""
+        condition_id = "0xstop_floor"
+        pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80)
+
+        # Sell order still live (not filled)
+        live_engine.executor.get_order_status.return_value = {
+            "status": "LIVE", "size_matched": 0, "original_size": 12.5,
+        }
+        # Current price dropped 5% → triggers stop loss
+        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.75):
+            # Order book has absurdly low bid ($0.01)
+            live_engine.executor.get_order_book.return_value = {
+                "bids": [(0.01, 100.0)], "asks": [(0.90, 50.0)]
+            }
+            # Post limit order succeeds
+            live_engine.executor.post_limit_order.return_value = {
+                "orderID": "exit-floor-001", "success": True
+            }
+
+            await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should have posted exit at floor price ($0.40 = 50% of $0.80), not $0.01
+        call_args = live_engine.executor.post_limit_order.call_args
+        if call_args:
+            exit_price = call_args.kwargs.get("price", call_args[1].get("price", 0))
+            assert exit_price >= 0.40, f"Exit price {exit_price} is below 50% floor"
+
+    @pytest.mark.asyncio
+    async def test_timeout_blocked_when_bid_below_floor(self, live_engine):
+        """Timeout exit is BLOCKED when best bid is below 50% floor."""
+        condition_id = "0xtimeout_blocked"
+        pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
+
+        # Sell order still live
+        live_engine.executor.get_order_status.return_value = {
+            "status": "LIVE", "size_matched": 0, "original_size": 12.5,
+        }
+        # Price hasn't dropped enough for stop loss
+        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.79):
+            # Book has very thin bids below floor
+            live_engine.executor.get_order_book.return_value = {
+                "bids": [(0.10, 5.0)], "asks": [(0.85, 50.0)]
+            }
+
+            await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should NOT have posted any exit order (blocked by floor)
+        live_engine.executor.post_limit_order.assert_not_called()
+        # Position should still exist
+        assert condition_id in live_engine.portfolio.positions
+        # Timer should have been reset (mm_entry_time updated)
+        new_entry_time = datetime.fromisoformat(pos["mm_entry_time"])
+        # Should be very recent (within last few seconds)
+        age = (datetime.now(timezone.utc) - new_entry_time).total_seconds()
+        assert age < 5, f"Timer was not reset, age={age}s"
+
+    @pytest.mark.asyncio
+    async def test_timeout_proceeds_when_bid_above_floor(self, live_engine):
+        """Timeout exit proceeds normally when best bid is above 50% floor."""
+        condition_id = "0xtimeout_ok"
+        pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
+
+        live_engine.executor.get_order_status.return_value = {
+            "status": "LIVE", "size_matched": 0, "original_size": 12.5,
+        }
+        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.79):
+            # Book has bids above floor ($0.40)
+            live_engine.executor.get_order_book.return_value = {
+                "bids": [(0.75, 50.0)], "asks": [(0.80, 50.0)]
+            }
+            live_engine.executor.post_limit_order.return_value = {
+                "orderID": "exit-ok-001", "success": True
+            }
+
+            await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should have posted exit order
+        live_engine.executor.post_limit_order.assert_called_once()
+        # Position should be in EXIT_PENDING
+        assert pos["live_state"] == "EXIT_PENDING"
+
+
+# ============================================================
+# BUY FILL PRICE TRACKING TESTS
+# ============================================================
+
+class TestBuyFillPriceTracking:
+    """Tests for tracking actual buy fill prices from CLOB."""
+
+    @pytest.fixture
+    def live_engine(self, tmp_path):
+        """Create a live-mode TradingEngine."""
+        portfolio_file = tmp_path / "test_portfolio.json"
+
+        with patch.object(Portfolio, '__init__', lambda self, **kwargs: None):
+            engine = TradingEngine(live=True)
+
+        engine.portfolio = Portfolio(
+            initial_balance=1000.0,
+            data_file=str(portfolio_file)
+        )
+        engine.scanner = MarketScanner()
+        engine.live = True
+        engine.running = False
+
+        engine.executor = MagicMock()
+        engine.executor.get_order_status = AsyncMock()
+        engine.executor.get_fill_price = AsyncMock()
+        engine.executor.post_limit_order = AsyncMock()
+
+        engine.safety = MagicMock()
+
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_buy_fill_updates_entry_price(self, live_engine):
+        """When buy fills at different price, entry_price is corrected."""
+        condition_id = "0xbuy_fill"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Buy fill tracking test?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "BUY_PENDING"
+        pos["buy_order_id"] = "buy-order-001"
+        pos["token_id"] = "token-buy"
+        pos["mm_ask"] = 0.82
+        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+
+        # Buy order fully matched
+        live_engine.executor.get_order_status.return_value = {
+            "status": "MATCHED",
+            "size_matched": 12.5,
+            "original_size": 12.5,
+            "price": 0.80,
+        }
+        # But actual fill was at $0.78 (price improvement!)
+        live_engine.executor.get_fill_price.return_value = 0.78
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Entry price should be corrected to actual fill
+        assert pos["entry_price"] == pytest.approx(0.78, abs=0.001)
+        assert pos["actual_fill_price"] == pytest.approx(0.78, abs=0.001)
+        assert pos["live_state"] == "BUY_FILLED"
+
+    @pytest.mark.asyncio
+    async def test_buy_fill_resets_timer(self, live_engine):
+        """Buy fill resets the timeout timer (timer starts from fill, not post)."""
+        condition_id = "0xbuy_timer"
+        live_engine.portfolio.buy(
+            condition_id=condition_id,
+            question="Timer reset test?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="MM opportunity",
+            strategy="MARKET_MAKER",
+        )
+        pos = live_engine.portfolio.positions[condition_id]
+        pos["live_state"] = "BUY_PENDING"
+        pos["buy_order_id"] = "buy-order-002"
+        pos["token_id"] = "token-timer"
+        pos["mm_ask"] = 0.82
+        # Buy was posted 3 hours ago
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        pos["mm_entry_time"] = old_time
+
+        live_engine.executor.get_order_status.return_value = {
+            "status": "MATCHED",
+            "size_matched": 12.5,
+            "original_size": 12.5,
+            "price": 0.80,
+        }
+        live_engine.executor.get_fill_price.return_value = 0.80
+
+        await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Timer should be reset to now, not still 3 hours ago
+        new_time = datetime.fromisoformat(pos["mm_entry_time"])
+        age = (datetime.now(timezone.utc) - new_time).total_seconds()
+        assert age < 5, f"Timer was not reset after buy fill, age={age}s"
+
+
+# ============================================================
+# ON-CHAIN BALANCE SYNC TESTS
+# ============================================================
+
+class TestOnChainBalanceSync:
+    """Tests for _sync_on_chain_balance — corrects internal state from chain."""
+
+    @pytest.fixture
+    def live_engine(self, tmp_path):
+        """Create a live-mode TradingEngine for sync tests."""
+        portfolio_file = tmp_path / "test_portfolio.json"
+
+        with patch.object(Portfolio, '__init__', lambda self, **kwargs: None):
+            engine = TradingEngine(live=True)
+
+        engine.portfolio = Portfolio(
+            initial_balance=1000.0,
+            data_file=str(portfolio_file)
+        )
+        engine.live = True
+        engine.executor = MagicMock()
+        engine.executor.get_balance_usdc = AsyncMock()
+        engine.stop_tracker = {}
+        engine._stop_tracker_file = tmp_path / "stop_tracker.json"
+
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_corrects_significant_drift(self, live_engine):
+        """Corrects balance when drift exceeds $0.50."""
+        live_engine.portfolio.balance = 15.82  # Internal says $15.82
+        live_engine.executor.get_balance_usdc.return_value = 10.47  # Chain says $10.47
+
+        await live_engine._sync_on_chain_balance()
+
+        assert live_engine.portfolio.balance == pytest.approx(10.47, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_ignores_small_drift(self, live_engine):
+        """Does not correct balance for drift under $0.50."""
+        live_engine.portfolio.balance = 10.30
+        live_engine.executor.get_balance_usdc.return_value = 10.47  # Only $0.17 drift
+
+        await live_engine._sync_on_chain_balance()
+
+        # Should NOT correct — drift is minor
+        assert live_engine.portfolio.balance == pytest.approx(10.30, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_rpc_failure_preserves_state(self, live_engine):
+        """RPC failure returns None — internal state is preserved."""
+        live_engine.portfolio.balance = 15.82
+        live_engine.executor.get_balance_usdc.return_value = None  # RPC down
+
+        await live_engine._sync_on_chain_balance()
+
+        # Balance should NOT change
+        assert live_engine.portfolio.balance == pytest.approx(15.82, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_corrects_upward_drift(self, live_engine):
+        """Also corrects when internal balance is too LOW."""
+        live_engine.portfolio.balance = 5.00  # Internal too low
+        live_engine.executor.get_balance_usdc.return_value = 20.00  # Chain says $20
+
+        await live_engine._sync_on_chain_balance()
+
+        assert live_engine.portfolio.balance == pytest.approx(20.00, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_exception_does_not_crash(self, live_engine):
+        """Any exception in sync must not crash the trading loop."""
+        live_engine.portfolio.balance = 10.00
+        live_engine.executor.get_balance_usdc = AsyncMock(side_effect=Exception("Web3 crash"))
+
+        # Should not raise
+        await live_engine._sync_on_chain_balance()
+
+        # Balance preserved
+        assert live_engine.portfolio.balance == pytest.approx(10.00, abs=0.01)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

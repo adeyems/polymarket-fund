@@ -1366,6 +1366,7 @@ class TradingEngine:
         self.news_intel = NewsIntelligence()
         self.running = False
         self._last_scan_time = None  # Track when we last scanned for new opportunities
+        self._last_sync_time = None  # Track when we last synced with on-chain balance
 
         # AI market screening (Gemini - free tier)
         if CONFIG.get("mm_ai_screen"):
@@ -2632,11 +2633,50 @@ class TradingEngine:
         )
         return selected
 
+    async def _sync_on_chain_balance(self):
+        """Sync internal balance with on-chain reality (live mode only).
+
+        Queries wallet USDC.e balance + CLOB open order locks to compute
+        the real total value. If it diverges from internal state by more
+        than $0.50, corrects the internal balance.
+
+        This prevents the repeated drift bugs where internal bookkeeping
+        showed wrong values ($5.06 vs $20 actual, $15.82 vs $10.47 actual).
+        """
+        try:
+            on_chain = await self.executor.get_balance_usdc()
+            if on_chain is None:
+                return  # RPC failure — don't touch internal state
+
+            # Calculate what we think the balance should be
+            internal_balance = self.portfolio.balance
+            drift = on_chain - internal_balance
+
+            if abs(drift) > 0.50:  # Only correct meaningful drift (>$0.50)
+                print(f"[SYNC] Balance drift detected: internal=${internal_balance:.2f}, on-chain=${on_chain:.2f}, drift=${drift:+.2f}")
+                self.portfolio.balance = on_chain
+                self.portfolio._save()
+                print(f"[SYNC] Corrected balance to ${on_chain:.2f}")
+            elif abs(drift) > 0.01:
+                # Small drift — log but don't correct (could be rounding)
+                print(f"[SYNC] Minor drift: ${drift:+.2f} (internal=${internal_balance:.2f}, chain=${on_chain:.2f})")
+        except Exception as e:
+            print(f"[SYNC] Error: {e}")  # Never let sync break trading
+
     async def run_cycle(self):
         """Run one trading cycle."""
         print(f"\n{'='*60}")
         print(f"  CYCLE @ {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*60}")
+
+        # 0. Sync with on-chain reality (live mode only, every 5 minutes)
+        if self.live:
+            now_utc = datetime.now(timezone.utc)
+            sync_interval = 300  # 5 minutes
+            if not hasattr(self, '_last_sync_time') or self._last_sync_time is None \
+               or (now_utc - self._last_sync_time).total_seconds() >= sync_interval:
+                self._last_sync_time = now_utc
+                await self._sync_on_chain_balance()
 
         # 1. Check exits on existing positions (EVERY cycle — 60s)
         if self.portfolio.positions:

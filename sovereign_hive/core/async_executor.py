@@ -310,6 +310,60 @@ class AsyncExecutor:
             print(f"[EXEC] Cancel error: {e}")
             return False
 
+    async def get_balance_usdc(self) -> Optional[float]:
+        """
+        Get the actual USDC.e balance from on-chain.
+
+        This is the source of truth — not our internal bookkeeping.
+        Queries the ERC20 balanceOf directly via the wallet's RPC.
+        Returns None on error (don't corrupt internal state on RPC failure).
+        """
+        if not self._initialized:
+            await self.init()
+
+        if not self.client:
+            return None
+
+        try:
+            from web3 import Web3
+            w3 = Web3(Web3.HTTPProvider("https://1rpc.io/matic"))
+            wallet = os.getenv("POLYMARKET_PRIVATE_KEY", "")
+            if not wallet:
+                return None
+            # Derive address from private key
+            account = w3.eth.account.from_key(wallet)
+            address = account.address
+
+            usdc_addr = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+            abi = [{"constant": True, "inputs": [{"name": "_owner", "type": "address"}],
+                    "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}],
+                    "type": "function"},
+                   {"constant": True, "inputs": [], "name": "decimals",
+                    "outputs": [{"name": "", "type": "uint8"}], "type": "function"}]
+            contract = w3.eth.contract(address=usdc_addr, abi=abi)
+            raw = await asyncio.to_thread(contract.functions.balanceOf(address).call)
+            decimals = await asyncio.to_thread(contract.functions.decimals().call)
+            balance = raw / (10 ** decimals)
+            return balance
+        except Exception as e:
+            print(f"[EXEC] get_balance_usdc error: {e}")
+            return None
+
+    async def get_open_orders(self) -> list:
+        """Get all open orders from the CLOB."""
+        if not self._initialized:
+            await self.init()
+
+        if not self.client:
+            return []
+
+        try:
+            orders = await asyncio.to_thread(self.client.get_orders)
+            return orders
+        except Exception as e:
+            print(f"[EXEC] get_open_orders error: {e}")
+            return []
+
     async def get_fill_price(self, order_id: str) -> Optional[float]:
         """
         Get the actual execution price for a filled order from CLOB trade history.
