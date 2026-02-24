@@ -474,7 +474,7 @@ class MarketScanner:
 
     async def get_active_markets(self) -> List[dict]:
         """Fetch active markets with good liquidity (with retry)."""
-        params = {"limit": 200, "active": "true", "closed": "false", "order": "volume24hr", "ascending": "false"}
+        params = {"limit": 500, "active": "true", "closed": "false", "order": "volume24hr", "ascending": "false"}
         markets = await self._fetch_with_retry(self.GAMMA_API, params=params, timeout=15)
         if not markets:
             return []
