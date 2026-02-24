@@ -1742,8 +1742,15 @@ class TestBuyFillPriceTracking:
 # ON-CHAIN BALANCE SYNC TESTS
 # ============================================================
 
-class TestOnChainBalanceSync:
-    """Tests for _sync_on_chain_balance — corrects internal state from chain."""
+class TestOnChainBalanceLog:
+    """Tests for _log_on_chain_balance — LOG ONLY, never auto-correct.
+
+    The original _sync_on_chain_balance auto-corrected balance drift, but
+    it fought with order lifecycle (BUY post/cancel/timeout) causing
+    double-counting that created phantom buying power → -$14.77 real loss.
+
+    Now we only LOG the drift. Balance is NEVER modified by the sync.
+    """
 
     @pytest.fixture
     def live_engine(self, tmp_path):
@@ -1766,57 +1773,58 @@ class TestOnChainBalanceSync:
         return engine
 
     @pytest.mark.asyncio
-    async def test_corrects_significant_drift(self, live_engine):
-        """Corrects balance when drift exceeds $0.50."""
-        live_engine.portfolio.balance = 15.82  # Internal says $15.82
-        live_engine.executor.get_balance_usdc.return_value = 10.47  # Chain says $10.47
-
-        await live_engine._sync_on_chain_balance()
-
-        assert live_engine.portfolio.balance == pytest.approx(10.47, abs=0.01)
-
-    @pytest.mark.asyncio
-    async def test_ignores_small_drift(self, live_engine):
-        """Does not correct balance for drift under $0.50."""
-        live_engine.portfolio.balance = 10.30
-        live_engine.executor.get_balance_usdc.return_value = 10.47  # Only $0.17 drift
-
-        await live_engine._sync_on_chain_balance()
-
-        # Should NOT correct — drift is minor
-        assert live_engine.portfolio.balance == pytest.approx(10.30, abs=0.01)
-
-    @pytest.mark.asyncio
-    async def test_rpc_failure_preserves_state(self, live_engine):
-        """RPC failure returns None — internal state is preserved."""
+    async def test_never_modifies_balance(self, live_engine):
+        """Log-only sync must NEVER change the internal balance."""
         live_engine.portfolio.balance = 15.82
-        live_engine.executor.get_balance_usdc.return_value = None  # RPC down
+        live_engine.executor.get_balance_usdc.return_value = 10.47  # Big drift
 
-        await live_engine._sync_on_chain_balance()
+        await live_engine._log_on_chain_balance()
 
-        # Balance should NOT change
+        # Balance must NOT change — log only
         assert live_engine.portfolio.balance == pytest.approx(15.82, abs=0.01)
 
     @pytest.mark.asyncio
-    async def test_corrects_upward_drift(self, live_engine):
-        """Also corrects when internal balance is too LOW."""
-        live_engine.portfolio.balance = 5.00  # Internal too low
-        live_engine.executor.get_balance_usdc.return_value = 20.00  # Chain says $20
+    async def test_rpc_failure_preserves_state(self, live_engine):
+        """RPC failure returns None — state preserved."""
+        live_engine.portfolio.balance = 15.82
+        live_engine.executor.get_balance_usdc.return_value = None
 
-        await live_engine._sync_on_chain_balance()
+        await live_engine._log_on_chain_balance()
 
-        assert live_engine.portfolio.balance == pytest.approx(20.00, abs=0.01)
+        assert live_engine.portfolio.balance == pytest.approx(15.82, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_accounts_for_clob_locked_funds(self, live_engine):
+        """Drift calculation accounts for USDC locked in BUY_PENDING orders."""
+        live_engine.portfolio.balance = 20.00
+        # One BUY_PENDING position with $10 locked on CLOB
+        live_engine.portfolio.buy(
+            condition_id="0xtest",
+            question="Test?",
+            side="MM",
+            price=0.80,
+            amount=10.0,
+            reason="test",
+            strategy="MARKET_MAKER",
+        )
+        live_engine.portfolio.positions["0xtest"]["live_state"] = "BUY_PENDING"
+
+        # Wallet shows $10 (because $10 is locked on CLOB)
+        live_engine.executor.get_balance_usdc.return_value = 10.00
+
+        await live_engine._log_on_chain_balance()
+
+        # Balance must NOT change
+        assert live_engine.portfolio.balance == pytest.approx(10.00, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_exception_does_not_crash(self, live_engine):
-        """Any exception in sync must not crash the trading loop."""
+        """Any exception must not crash the trading loop."""
         live_engine.portfolio.balance = 10.00
         live_engine.executor.get_balance_usdc = AsyncMock(side_effect=Exception("Web3 crash"))
 
-        # Should not raise
-        await live_engine._sync_on_chain_balance()
+        await live_engine._log_on_chain_balance()
 
-        # Balance preserved
         assert live_engine.portfolio.balance == pytest.approx(10.00, abs=0.01)
 
 

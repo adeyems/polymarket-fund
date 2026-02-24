@@ -2633,35 +2633,40 @@ class TradingEngine:
         )
         return selected
 
-    async def _sync_on_chain_balance(self):
-        """Sync internal balance with on-chain reality (live mode only).
+    async def _log_on_chain_balance(self):
+        """Log on-chain balance vs internal for monitoring (NO auto-correction).
 
-        Queries wallet USDC.e balance + CLOB open order locks to compute
-        the real total value. If it diverges from internal state by more
-        than $0.50, corrects the internal balance.
+        The previous _sync_on_chain_balance() auto-corrected drift, but this
+        fought with the order lifecycle:
+        - BUY posted → USDC leaves wallet → sync "corrects" balance down
+        - BUY cancelled → USDC returns AND bot restores cost_basis → double-counted
+        - This gave phantom buying power and caused -$14.77 real loss.
 
-        This prevents the repeated drift bugs where internal bookkeeping
-        showed wrong values ($5.06 vs $20 actual, $15.82 vs $10.47 actual).
+        Now we only LOG the comparison. The monitor/human decides if correction
+        is needed. Wallet balance != internal balance when orders are open
+        (USDC is locked on CLOB, not in wallet).
         """
         try:
             on_chain = await self.executor.get_balance_usdc()
             if on_chain is None:
-                return  # RPC failure — don't touch internal state
+                return
 
-            # Calculate what we think the balance should be
             internal_balance = self.portfolio.balance
-            drift = on_chain - internal_balance
+            # Estimate CLOB-locked funds (open BUY positions in BUY_PENDING state)
+            clob_locked = 0.0
+            for pos in self.portfolio.positions.values():
+                if pos.get("live_state") == "BUY_PENDING":
+                    clob_locked += pos.get("cost_basis", 0)
 
-            if abs(drift) > 0.50:  # Only correct meaningful drift (>$0.50)
-                print(f"[SYNC] Balance drift detected: internal=${internal_balance:.2f}, on-chain=${on_chain:.2f}, drift=${drift:+.2f}")
-                self.portfolio.balance = on_chain
-                self.portfolio._save()
-                print(f"[SYNC] Corrected balance to ${on_chain:.2f}")
-            elif abs(drift) > 0.01:
-                # Small drift — log but don't correct (could be rounding)
-                print(f"[SYNC] Minor drift: ${drift:+.2f} (internal=${internal_balance:.2f}, chain=${on_chain:.2f})")
+            expected_wallet = internal_balance - clob_locked
+            drift = on_chain - expected_wallet
+
+            if abs(drift) > 1.00:
+                print(f"[CHAIN] DRIFT: wallet=${on_chain:.2f}, expected=${expected_wallet:.2f} (internal=${internal_balance:.2f} - locked=${clob_locked:.2f}), drift=${drift:+.2f}")
+            else:
+                print(f"[CHAIN] OK: wallet=${on_chain:.2f}, internal=${internal_balance:.2f}, locked=${clob_locked:.2f}")
         except Exception as e:
-            print(f"[SYNC] Error: {e}")  # Never let sync break trading
+            print(f"[CHAIN] Error: {e}")
 
     async def run_cycle(self):
         """Run one trading cycle."""
@@ -2669,14 +2674,17 @@ class TradingEngine:
         print(f"  CYCLE @ {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*60}")
 
-        # 0. Sync with on-chain reality (live mode only, every 5 minutes)
+        # 0. On-chain balance sync — LOG ONLY (do NOT auto-correct)
+        # Auto-correction was causing oscillation: sync fought with order lifecycle
+        # (BUY post reduces wallet, timeout restores it → double-counting).
+        # For now, just log the drift so the monitor can alert on it.
         if self.live:
             now_utc = datetime.now(timezone.utc)
             sync_interval = 300  # 5 minutes
             if not hasattr(self, '_last_sync_time') or self._last_sync_time is None \
                or (now_utc - self._last_sync_time).total_seconds() >= sync_interval:
                 self._last_sync_time = now_utc
-                await self._sync_on_chain_balance()
+                await self._log_on_chain_balance()
 
         # 1. Check exits on existing positions (EVERY cycle — 60s)
         if self.portfolio.positions:
