@@ -1769,9 +1769,24 @@ class TradingEngine:
         if live_state == "BUY_PENDING":
             buy_order_id = position.get("buy_order_id", "")
             if not buy_order_id:
+                # Ghost position with no order ID — clean up
+                self.portfolio.balance += position.get("cost_basis", 0)
+                del self.portfolio.positions[condition_id]
+                self.portfolio._save()
+                print(f"[MM-LIVE] GHOST CLEANUP: no buy_order_id, returning ${position.get('cost_basis', 0):.2f}")
                 return
 
             status = await self.executor.get_order_status(buy_order_id)
+
+            # Order no longer exists on CLOB — clean up ghost position
+            if status.get("status") in ("ERROR", "CANCELLED", "CANCELED"):
+                self.portfolio.balance += position.get("cost_basis", 0)
+                del self.portfolio.positions[condition_id]
+                self.portfolio._save()
+                reason = status.get("status")
+                print(f"[MM-LIVE] BUY {reason}: order gone, returned ${position.get('cost_basis', 0):.2f}")
+                return
+
             matched = status.get("size_matched", 0)
             original = status.get("original_size", 0)
 
@@ -1797,14 +1812,6 @@ class TradingEngine:
                 del self.portfolio.positions[condition_id]
                 self.portfolio._save()
                 print(f"[MM-LIVE] BUY TIMEOUT: Cancelled unfilled buy after {hold_hours:.1f}h")
-            else:
-                # Still waiting for buy fill
-                if status.get("status") in ("CANCELLED", "CANCELED"):
-                    # Order was cancelled externally
-                    self.portfolio.balance += position["cost_basis"]
-                    del self.portfolio.positions[condition_id]
-                    self.portfolio._save()
-                    print(f"[MM-LIVE] BUY CANCELLED externally")
 
         elif live_state == "BUY_FILLED":
             # Post sell order at mm_ask
@@ -1872,9 +1879,21 @@ class TradingEngine:
         elif live_state == "SELL_PENDING":
             sell_order_id = position.get("sell_order_id", "")
             if not sell_order_id:
+                # No sell order ID — go back to BUY_FILLED to repost
+                position["live_state"] = "BUY_FILLED"
+                self.portfolio._save()
                 return
 
             status = await self.executor.get_order_status(sell_order_id)
+
+            # Sell order no longer exists on CLOB — go back to BUY_FILLED to repost
+            if status.get("status") == "ERROR":
+                position["live_state"] = "BUY_FILLED"
+                position["sell_order_id"] = ""
+                self.portfolio._save()
+                print(f"[MM-LIVE] SELL ORDER GONE (CLOB error), will repost next cycle")
+                return
+
             matched = status.get("size_matched", 0)
             original = status.get("original_size", 0)
 
@@ -1995,14 +2014,14 @@ class TradingEngine:
                         self._save_stop_tracker()
                     print(f"[MM-LIVE] {exit_reason} @ ${actual_exit:.3f}: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
 
-            elif status.get("status") in ("CANCELLED", "CANCELED"):
-                # Exit order was cancelled — go back to BUY_FILLED to retry
+            elif status.get("status") in ("CANCELLED", "CANCELED", "ERROR"):
+                # Exit order gone — go back to BUY_FILLED to retry
                 position["live_state"] = "BUY_FILLED"
                 position.pop("exit_order_id", None)
                 position.pop("exit_reason", None)
                 position.pop("exit_limit_price", None)
                 self.portfolio._save()
-                print(f"[MM-LIVE] EXIT CANCELLED, will retry next cycle")
+                print(f"[MM-LIVE] EXIT {status.get('status')}, will retry next cycle")
 
     def _load_stop_tracker(self):
         """Load stop tracker from disk (survives process restarts)."""
@@ -2740,6 +2759,118 @@ class TradingEngine:
         )
         return selected
 
+    async def _startup_reconcile(self):
+        """
+        On live startup, validate all positions against the CLOB and on-chain balance.
+
+        Ghost positions (orders that no longer exist) are cleaned up immediately.
+        Balance is synced to on-chain wallet after ghost cleanup.
+        This runs ONCE at startup before the trading loop begins.
+        """
+        if not self.live or not self.executor:
+            return
+
+        positions = list(self.portfolio.positions.items())
+        if not positions:
+            # No positions — just sync balance
+            try:
+                on_chain = await self.executor.get_balance_usdc()
+                if on_chain is not None and abs(on_chain - self.portfolio.balance) > 0.50:
+                    old = self.portfolio.balance
+                    self.portfolio.balance = on_chain
+                    self.portfolio._save()
+                    print(f"[RECONCILE] Balance synced: ${old:.2f} → ${on_chain:.2f}")
+                else:
+                    print(f"[RECONCILE] Balance OK: ${self.portfolio.balance:.2f}")
+            except Exception as e:
+                print(f"[RECONCILE] Balance check failed: {e}")
+            return
+
+        print(f"[RECONCILE] Validating {len(positions)} positions against CLOB...")
+        ghosts_cleaned = 0
+
+        for condition_id, pos in positions:
+            live_state = pos.get("live_state", "")
+            order_id = ""
+
+            if live_state == "BUY_PENDING":
+                order_id = pos.get("buy_order_id", "")
+            elif live_state == "SELL_PENDING":
+                order_id = pos.get("sell_order_id", "")
+            elif live_state == "EXIT_PENDING":
+                order_id = pos.get("exit_order_id", "")
+            elif live_state == "BUY_FILLED":
+                # Has shares but no pending order — valid state, skip
+                print(f"[RECONCILE] {pos.get('question', '')[:40]}... BUY_FILLED (has shares, needs sell)")
+                continue
+            else:
+                # Unknown state — skip
+                continue
+
+            if not order_id:
+                # No order ID — ghost, clean up
+                if live_state == "BUY_PENDING":
+                    self.portfolio.balance += pos.get("cost_basis", 0)
+                del self.portfolio.positions[condition_id]
+                ghosts_cleaned += 1
+                print(f"[RECONCILE] GHOST (no order_id): {pos.get('question', '')[:40]}... → removed")
+                continue
+
+            # Check if order still exists on CLOB
+            status = await self.executor.get_order_status(order_id)
+            clob_status = status.get("status", "UNKNOWN")
+
+            if clob_status in ("ERROR", "UNKNOWN"):
+                # Order doesn't exist on CLOB anymore
+                if live_state == "BUY_PENDING":
+                    self.portfolio.balance += pos.get("cost_basis", 0)
+                    del self.portfolio.positions[condition_id]
+                    ghosts_cleaned += 1
+                    print(f"[RECONCILE] GHOST (order gone): {pos.get('question', '')[:40]}... → returned ${pos.get('cost_basis', 0):.2f}")
+                elif live_state in ("SELL_PENDING", "EXIT_PENDING"):
+                    # Sell/exit order gone — revert to BUY_FILLED to repost
+                    pos["live_state"] = "BUY_FILLED"
+                    pos.pop("sell_order_id", None)
+                    pos.pop("exit_order_id", None)
+                    pos.pop("exit_reason", None)
+                    pos.pop("exit_limit_price", None)
+                    print(f"[RECONCILE] STALE SELL: {pos.get('question', '')[:40]}... → reverted to BUY_FILLED")
+            elif clob_status in ("CANCELLED", "CANCELED"):
+                if live_state == "BUY_PENDING":
+                    self.portfolio.balance += pos.get("cost_basis", 0)
+                    del self.portfolio.positions[condition_id]
+                    ghosts_cleaned += 1
+                    print(f"[RECONCILE] CANCELLED: {pos.get('question', '')[:40]}... → returned ${pos.get('cost_basis', 0):.2f}")
+                elif live_state in ("SELL_PENDING", "EXIT_PENDING"):
+                    pos["live_state"] = "BUY_FILLED"
+                    pos.pop("sell_order_id", None)
+                    pos.pop("exit_order_id", None)
+                    print(f"[RECONCILE] CANCELLED SELL: {pos.get('question', '')[:40]}... → reverted to BUY_FILLED")
+            else:
+                print(f"[RECONCILE] VALID: {pos.get('question', '')[:40]}... state={live_state} clob={clob_status}")
+
+        if ghosts_cleaned > 0:
+            self.portfolio._save()
+            print(f"[RECONCILE] Cleaned {ghosts_cleaned} ghost positions")
+
+        # Now sync balance to on-chain (after ghost cleanup, pending orders are real)
+        try:
+            on_chain = await self.executor.get_balance_usdc()
+            if on_chain is not None:
+                has_pending = any(
+                    p.get("live_state") in ("BUY_PENDING", "EXIT_PENDING")
+                    for p in self.portfolio.positions.values()
+                )
+                if not has_pending and abs(on_chain - self.portfolio.balance) > 0.50:
+                    old = self.portfolio.balance
+                    self.portfolio.balance = on_chain
+                    self.portfolio._save()
+                    print(f"[RECONCILE] Balance synced: ${old:.2f} → ${on_chain:.2f}")
+                else:
+                    print(f"[RECONCILE] Balance: ${self.portfolio.balance:.2f} (on-chain: ${on_chain:.2f})")
+        except Exception as e:
+            print(f"[RECONCILE] Balance check failed: {e}")
+
     async def _log_on_chain_balance(self):
         """Sync on-chain balance with internal state.
 
@@ -2791,10 +2922,9 @@ class TradingEngine:
         print(f"  CYCLE @ {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*60}")
 
-        # 0. On-chain balance sync — LOG ONLY (do NOT auto-correct)
-        # Auto-correction was causing oscillation: sync fought with order lifecycle
-        # (BUY post reduces wallet, timeout restores it → double-counting).
-        # For now, just log the drift so the monitor can alert on it.
+        # 0. On-chain balance sync — auto-corrects when no orders are in flight.
+        # Ghost positions are cleaned at startup (_startup_reconcile), so
+        # has_pending_orders should be accurate during normal operation.
         if self.live:
             now_utc = datetime.now(timezone.utc)
             sync_interval = 300  # 5 minutes
@@ -2966,6 +3096,10 @@ class TradingEngine:
             loop = asyncio.get_event_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: setattr(self, 'running', False))
+
+        # Live startup: reconcile portfolio with on-chain reality
+        if self.live:
+            await self._startup_reconcile()
 
         self.running = True
 
