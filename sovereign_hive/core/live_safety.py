@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 class LiveSafety:
     """Safety checks that must pass before any live order is placed."""
 
-    MAX_SINGLE_ORDER_USD = 10        # No single order > $10 (conservative for $20 capital)
+    MAX_SINGLE_ORDER_USD = 25        # No single order > $25
     MAX_TOTAL_EXPOSURE_PCT = 0.80    # Max 80% of portfolio in open positions
     DAILY_LOSS_LIMIT_USD = 10        # Halt new orders if daily P&L < -$10
     BALANCE_BUFFER_PCT = 0.05        # Require 5% balance buffer above order amount
@@ -48,7 +48,6 @@ class LiveSafety:
         order_amount: float,
         portfolio_balance: float,
         total_exposure: float,
-        portfolio_initial: float,
     ) -> tuple:
         """
         Run all safety checks before placing an order.
@@ -75,9 +74,10 @@ class LiveSafety:
         if portfolio_balance < min_balance:
             return False, f"Balance ${portfolio_balance:.2f} < required ${min_balance:.2f} (5% buffer)"
 
-        # Total exposure cap
+        # Total exposure cap (based on actual capital: balance + deployed)
+        actual_capital = portfolio_balance + total_exposure
         new_exposure = total_exposure + order_amount
-        max_exposure = portfolio_initial * self.MAX_TOTAL_EXPOSURE_PCT
+        max_exposure = actual_capital * self.MAX_TOTAL_EXPOSURE_PCT
         if new_exposure > max_exposure:
             return False, f"Total exposure ${new_exposure:.2f} would exceed {self.MAX_TOTAL_EXPOSURE_PCT:.0%} cap (${max_exposure:.2f})"
 

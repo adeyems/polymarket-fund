@@ -89,7 +89,7 @@ CONFIG = {
     "mm_slippage_bps": 20,           # 20 bps (0.2%) slippage on entry/exit prices (sim only)
 
     # LIVE TRADING LIMITS (only used when --live flag is set)
-    "live_max_order": 10,            # Max $10 per order (conservative for small accounts)
+    "live_max_order": 25,            # Max $25 per order
     "live_min_position": 5,          # Min $5 position (Polymarket allows ~$1 but gas makes <$5 wasteful)
     "live_max_position_pct": 0.50,   # Allow 50% of balance per trade for small accounts (capped by live_max_order)
 
@@ -2333,7 +2333,6 @@ class TradingEngine:
                 order_amount=amount,
                 portfolio_balance=self.portfolio.balance,
                 total_exposure=total_exposure,
-                portfolio_initial=self.portfolio.initial_balance,
             )
             if not safe:
                 print(f"[TRADE-LIVE] SAFETY BLOCK: {reason}")
@@ -2572,7 +2571,6 @@ class TradingEngine:
                 order_amount=buy_amount,
                 portfolio_balance=self.portfolio.balance,
                 total_exposure=total_exposure,
-                portfolio_initial=self.portfolio.initial_balance,
             )
             if not safe:
                 print(f"[MM-LIVE] SAFETY BLOCK: {reason}")
