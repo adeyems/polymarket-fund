@@ -493,11 +493,11 @@ class BacktestEngine:
         if pnl_pct <= overrides.stop_loss_pct:
             return (current_price, "MM_STOP")
 
-        # 3. Timeout: exit at BID (forced seller gets worse price)
+        # 3. Timeout: only exit if profit covers taker costs (>=3%)
         if hold_hours >= overrides.max_hold_hours and overrides.max_hold_hours > 0:
-            # Exit at bid = current price - half spread (forced seller penalty)
-            timeout_price = current_price * (1 - 0.01)  # ~1% penalty for forced exit
-            return (timeout_price, "MM_TIMEOUT")
+            if pnl_pct >= 0.03:  # Only timeout-exit if profitable enough
+                timeout_price = current_price * (1 - 0.01)  # ~1% penalty for forced exit
+                return (timeout_price, "MM_TIMEOUT")
 
         return None
 

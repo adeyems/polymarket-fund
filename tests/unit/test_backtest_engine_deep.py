@@ -636,15 +636,26 @@ class TestCheckMmExit:
         assert result[0] == 0.45
 
     def test_mm_timeout(self):
-        """Hold > max_hold_hours → MM_TIMEOUT with penalty."""
-        pos = self._make_mm_pos(entry_price=0.50)
+        """Hold > max_hold_hours with sufficient profit → MM_TIMEOUT with penalty."""
+        pos = self._make_mm_pos(entry_price=0.50, mm_ask=0.56)
         overrides = StrategyOverrides(stop_loss_pct=-0.10, fill_probability=0.6, max_hold_hours=4.0)
 
-        result = BacktestEngine._check_mm_exit(None, pos, 0.51, 5.0, overrides)
+        # Price 0.52 = 4% above entry (>= 3% threshold), but below mm_ask (0.56)
+        result = BacktestEngine._check_mm_exit(None, pos, 0.52, 5.0, overrides)
 
         assert result is not None
         assert result[1] == "MM_TIMEOUT"
-        assert result[0] < 0.51  # Penalty applied
+        assert result[0] < 0.52  # Penalty applied
+
+    def test_mm_timeout_hold_low_profit(self):
+        """Hold > max_hold_hours but profit < 3% → hold (no exit)."""
+        pos = self._make_mm_pos(entry_price=0.50)
+        overrides = StrategyOverrides(stop_loss_pct=-0.10, fill_probability=0.6, max_hold_hours=4.0)
+
+        # Price is only 2% above entry — not worth taker fees
+        result = BacktestEngine._check_mm_exit(None, pos, 0.51, 5.0, overrides)
+
+        assert result is None  # Should hold, not timeout-exit
 
 
 # ============================================================

@@ -79,6 +79,7 @@ CONFIG = {
     "mm_min_liquidity": 10000,       # $10k+ liquidity
     "mm_target_profit": 0.015,       # 1.5% default (AI overrides per-market)
     "mm_max_hold_hours": 4,          # Exit after 4h (was 2h, too short for maker sells)
+    "mm_timeout_min_profit_pct": 0.03,  # 3% min profit before timeout exit (covers taker fees + slippage)
     "mm_price_range": (0.50, 0.70),  # SWEET SPOT: Kelly +29-48%, ROI +23-26% (was 0.05-0.95)
     "mm_fallback_range": (0.80, 0.95),  # SECONDARY: Kelly +4-20%, smaller edge
     "mm_max_days_to_resolve": 30,    # 15-30d optimal, 30d cap works
@@ -1730,7 +1731,17 @@ class TradingEngine:
 
         # EXIT CONDITION 3: Timeout (didn't fill in time)
         # MM_TIMEOUT = taker exit (exiting at market) = taker fee + slippage
+        # RULE: Don't dump for 0-1% — only timeout-exit if profit covers taker costs (>=3%)
+        mm_timeout_min_profit = CONFIG.get("mm_timeout_min_profit_pct", 0.03)
         if hold_hours >= CONFIG["mm_max_hold_hours"]:
+            if pnl_pct < mm_timeout_min_profit:
+                # Not enough profit to cover taker fees + slippage. Hold position.
+                # The sell at mm_ask is still posted — let it fill naturally.
+                if hold_hours < CONFIG["mm_max_hold_hours"] + 1:
+                    # Log once when we first skip the timeout
+                    print(f"[MM] TIMEOUT HOLD: {position.get('question', '')[:40]}... "
+                          f"P&L {pnl_pct:+.1%} < {mm_timeout_min_profit:.0%} min, keeping sell posted")
+                return
             slippage = CONFIG.get("mm_slippage_bps", 20) / 10000
             exit_price = current_price * (1 - slippage)
             timeout_fee = polymarket_taker_fee(exit_price)

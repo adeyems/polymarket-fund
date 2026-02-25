@@ -163,6 +163,29 @@ class AsyncExecutor:
 
         return await self._retry_operation(_do, "execute_order")
 
+    async def _resync_negrisk_balance(self, token_id: str):
+        """
+        Force CLOB to resync its internal balance cache for a NegRisk token.
+
+        CRITICAL FIX (2026-02-25): NegRisk sell orders fail with
+        'not enough balance/allowance' even when on-chain balance and approvals
+        are correct. Root cause: CLOB's internal balance cache goes stale.
+        Calling update_balance_allowance forces a resync and fixes the issue.
+        """
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=0,
+            )
+            await asyncio.to_thread(
+                self.client.update_balance_allowance, params
+            )
+            print(f"[EXEC] NegRisk balance resync OK for {token_id[:20]}...")
+        except Exception as e:
+            print(f"[EXEC] NegRisk balance resync warning: {e}")
+
     async def post_limit_order(
         self,
         token_id: str,
@@ -190,6 +213,10 @@ class AsyncExecutor:
 
         if not self.client:
             return {"success": False, "error": "Client not initialized"}
+
+        # For SELL orders: resync CLOB balance cache (fixes NegRisk stale cache bug)
+        if side == "SELL":
+            await self._resync_negrisk_balance(token_id)
 
         # Query fee rate (0 for post-only/maker, but must match CLOB expectation)
         fee_bps = await self.get_fee_rate_bps(token_id)
@@ -243,6 +270,11 @@ class AsyncExecutor:
             resp = await asyncio.to_thread(
                 self.client.get_order, order_id
             )
+            # Guard against None response (resolved markets return 400,
+            # or API can return None on edge cases)
+            if resp is None:
+                return {"status": "ERROR", "size_matched": 0, "original_size": 0,
+                        "error": "API returned None"}
             return {
                 "status": resp.get("status", "UNKNOWN"),
                 "size_matched": float(resp.get("size_matched", 0)),
@@ -252,7 +284,7 @@ class AsyncExecutor:
                 "response": resp,
             }
         except Exception as e:
-            print(f"[EXEC] get_order_status error: {e}")
+            print(f"[EXEC] get_order_status({order_id[:16]}...): {e}")
             return {"status": "ERROR", "size_matched": 0, "original_size": 0, "error": str(e)}
 
     async def cancel_all_orders(self) -> bool:

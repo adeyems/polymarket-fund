@@ -547,15 +547,16 @@ class TestMMExit:
         )
         pos = temp_engine.portfolio.positions["0xmm_timeout"]
         pos["mm_bid"] = 0.50
-        pos["mm_ask"] = 0.51
+        pos["mm_ask"] = 0.55
         # Set entry time to 25 hours ago (beyond 24h timeout)
         pos["mm_entry_time"] = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
         temp_engine.portfolio._save()
 
+        # Price must be >= 3% above entry for timeout exit (0.52+ on 0.50 entry)
         with patch.object(
             temp_engine.scanner, 'get_market_price',
             new_callable=AsyncMock,
-            return_value=0.505
+            return_value=0.52
         ):
             await temp_engine.check_exits()
 
