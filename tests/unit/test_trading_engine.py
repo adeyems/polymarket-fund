@@ -1491,16 +1491,16 @@ class TestExitPendingState:
 # FIRE-SALE PREVENTION TESTS
 # ============================================================
 
-class TestFireSalePrevention:
-    """Tests for the 50% price floor on MM exits.
+class TestAIExitDecisions:
+    """Tests for AI-driven exit decisions on live MM positions.
 
-    When the best bid is below 50% of entry price, exits are BLOCKED
-    to prevent catastrophic fire-sale losses on thin order books.
+    All exit paths (STOP_LOSS, TIMEOUT, SELL_FAILED) now consult Gemini AI
+    to decide whether to HOLD or SELL, and at what price.
     """
 
     @pytest.fixture
     def live_engine(self, tmp_path):
-        """Create a live-mode TradingEngine for fire-sale tests."""
+        """Create a live-mode TradingEngine for AI exit tests."""
         portfolio_file = tmp_path / "test_portfolio.json"
 
         with patch.object(Portfolio, '__init__', lambda self, **kwargs: None):
@@ -1548,52 +1548,99 @@ class TestFireSalePrevention:
         return pos
 
     @pytest.mark.asyncio
-    async def test_stop_loss_applies_price_floor(self, live_engine):
-        """Stop loss uses 50% floor when best bid is below it."""
-        condition_id = "0xstop_floor"
+    async def test_stop_loss_sells_when_ai_says_sell(self, live_engine):
+        """Stop loss exits at AI-recommended price when AI says SELL."""
+        condition_id = "0xstop_ai_sell"
         pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80)
 
-        # Sell order still live (not filled)
         live_engine.executor.get_order_status.return_value = {
             "status": "LIVE", "size_matched": 0, "original_size": 12.5,
         }
-        # Current price dropped 5% → triggers stop loss
+        live_engine.executor.post_limit_order.return_value = {
+            "orderID": "exit-ai-001", "success": True
+        }
+
+        # AI says SELL at $0.76
+        ai_decision = {"action": "SELL", "true_probability": 0.70, "sell_price": 0.76, "reason": "Event unlikely"}
         with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.75):
-            # Order book has absurdly low bid ($0.01)
-            live_engine.executor.get_order_book.return_value = {
-                "bids": [(0.01, 100.0)], "asks": [(0.90, 50.0)]
-            }
-            # Post limit order succeeds
-            live_engine.executor.post_limit_order.return_value = {
-                "orderID": "exit-floor-001", "success": True
-            }
+            with patch.object(live_engine, '_ai_exit_decision', new_callable=AsyncMock, return_value=ai_decision):
+                await live_engine._check_mm_exit_live(condition_id, pos)
 
-            await live_engine._check_mm_exit_live(condition_id, pos)
-
-        # Should have posted exit at floor price ($0.40 = 50% of $0.80), not $0.01
+        # Should have posted exit at AI's recommended price
+        live_engine.executor.post_limit_order.assert_called_once()
         call_args = live_engine.executor.post_limit_order.call_args
-        if call_args:
-            exit_price = call_args.kwargs.get("price", call_args[1].get("price", 0))
-            assert exit_price >= 0.40, f"Exit price {exit_price} is below 50% floor"
+        exit_price = call_args.kwargs.get("price", 0)
+        assert exit_price == 0.76, f"Exit should be at AI price $0.76, got {exit_price}"
+        assert pos["live_state"] == "EXIT_PENDING"
 
     @pytest.mark.asyncio
-    async def test_timeout_holds_when_bid_below_entry(self, live_engine):
-        """Timeout HOLDS position when best bid is below entry price — never sells at a loss on timeout."""
-        condition_id = "0xtimeout_blocked"
+    async def test_stop_loss_holds_when_ai_says_hold(self, live_engine):
+        """Stop loss HOLDS when AI says the drop is temporary."""
+        condition_id = "0xstop_ai_hold"
+        pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80)
+
+        live_engine.executor.get_order_status.return_value = {
+            "status": "LIVE", "size_matched": 0, "original_size": 12.5,
+        }
+
+        # AI says HOLD — true probability is higher than market price
+        ai_decision = {"action": "HOLD", "true_probability": 0.85, "sell_price": 0.80, "reason": "Temporary dip"}
+        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.75):
+            with patch.object(live_engine, '_ai_exit_decision', new_callable=AsyncMock, return_value=ai_decision):
+                await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should NOT have posted any exit order
+        live_engine.executor.post_limit_order.assert_not_called()
+        # Position should still exist
+        assert condition_id in live_engine.portfolio.positions
+        # Timer should have been reset
+        new_entry_time = datetime.fromisoformat(pos["mm_entry_time"])
+        age = (datetime.now(timezone.utc) - new_entry_time).total_seconds()
+        assert age < 5, f"Timer was not reset, age={age}s"
+
+    @pytest.mark.asyncio
+    async def test_timeout_sells_when_ai_says_sell(self, live_engine):
+        """Timeout exits at AI-recommended price when AI says SELL."""
+        condition_id = "0xtimeout_ai_sell"
         pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
 
         live_engine.executor.get_order_status.return_value = {
             "status": "LIVE", "size_matched": 0, "original_size": 12.5,
         }
+        live_engine.executor.post_limit_order.return_value = {
+            "orderID": "exit-timeout-001", "success": True
+        }
+
+        # AI says SELL at entry price (break-even)
+        ai_decision = {"action": "SELL", "true_probability": 0.78, "sell_price": 0.80, "reason": "No edge, exit at cost"}
+        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.82):
+            with patch.object(live_engine, '_ai_exit_decision', new_callable=AsyncMock, return_value=ai_decision):
+                await live_engine._check_mm_exit_live(condition_id, pos)
+
+        # Should have cancelled old sell and posted exit at AI price
+        live_engine.executor.post_limit_order.assert_called_once()
+        call_args = live_engine.executor.post_limit_order.call_args
+        exit_price = call_args.kwargs.get("price", 0)
+        assert exit_price == 0.80, f"Exit should be at AI price, got {exit_price}"
+        assert pos["live_state"] == "EXIT_PENDING"
+
+    @pytest.mark.asyncio
+    async def test_timeout_holds_when_ai_says_hold(self, live_engine):
+        """Timeout HOLDS position when AI sees remaining edge."""
+        condition_id = "0xtimeout_ai_hold"
+        pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
+
+        live_engine.executor.get_order_status.return_value = {
+            "status": "LIVE", "size_matched": 0, "original_size": 12.5,
+        }
+
+        # AI says HOLD — true probability supports our position
+        ai_decision = {"action": "HOLD", "true_probability": 0.90, "sell_price": 0.83, "reason": "Underpriced, hold for profit"}
         with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.79):
-            # Book has bids below entry ($0.80)
-            live_engine.executor.get_order_book.return_value = {
-                "bids": [(0.10, 5.0)], "asks": [(0.85, 50.0)]
-            }
+            with patch.object(live_engine, '_ai_exit_decision', new_callable=AsyncMock, return_value=ai_decision):
+                await live_engine._check_mm_exit_live(condition_id, pos)
 
-            await live_engine._check_mm_exit_live(condition_id, pos)
-
-        # Should NOT have posted any exit order — hold, don't dump
+        # Should NOT have posted any exit order
         live_engine.executor.post_limit_order.assert_not_called()
         # Should NOT have cancelled the sell order — keep it posted
         live_engine.executor.cancel_order.assert_not_called()
@@ -1603,33 +1650,6 @@ class TestFireSalePrevention:
         new_entry_time = datetime.fromisoformat(pos["mm_entry_time"])
         age = (datetime.now(timezone.utc) - new_entry_time).total_seconds()
         assert age < 5, f"Timer was not reset, age={age}s"
-
-    @pytest.mark.asyncio
-    async def test_timeout_exits_at_breakeven_when_bid_above_entry(self, live_engine):
-        """Timeout exits at break-even when best bid >= entry price."""
-        condition_id = "0xtimeout_ok"
-        pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
-
-        live_engine.executor.get_order_status.return_value = {
-            "status": "LIVE", "size_matched": 0, "original_size": 12.5,
-        }
-        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.82):
-            # Book has bids above entry price
-            live_engine.executor.get_order_book.return_value = {
-                "bids": [(0.81, 50.0)], "asks": [(0.83, 50.0)]
-            }
-            live_engine.executor.post_limit_order.return_value = {
-                "orderID": "exit-ok-001", "success": True
-            }
-
-            await live_engine._check_mm_exit_live(condition_id, pos)
-
-        # Should have cancelled old sell and posted exit at entry price (break-even)
-        live_engine.executor.post_limit_order.assert_called_once()
-        call_args = live_engine.executor.post_limit_order.call_args
-        exit_price = call_args.kwargs.get("price", 0)
-        assert exit_price == 0.80, f"Exit should be at entry price, got {exit_price}"
-        assert pos["live_state"] == "EXIT_PENDING"
 
 
 # ============================================================

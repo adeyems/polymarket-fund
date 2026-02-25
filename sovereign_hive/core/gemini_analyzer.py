@@ -439,6 +439,99 @@ Be CONSERVATIVE. If in doubt, say false. Repeated stops usually mean the market 
             print(f"[GEMINI] Reentry eval error: {e}")
             return default
 
+    async def evaluate_exit(
+        self,
+        question: str,
+        entry_price: float,
+        current_price: float,
+        hold_hours: float,
+        exit_trigger: str,
+        best_bid: float,
+        best_ask: float,
+    ) -> dict:
+        """
+        AI-driven exit decision. Called before ANY exit to determine if we should
+        hold, sell at market, or sell at a specific price.
+
+        exit_trigger: "TIMEOUT" | "STOP_LOSS" | "SELL_FAILED"
+
+        Returns:
+            {
+                "action": "HOLD" | "SELL",
+                "true_probability": 0.0-1.0,
+                "sell_price": float (only if action=SELL),
+                "reason": str,
+            }
+        """
+        default = {"action": "HOLD", "true_probability": current_price, "reason": "No API key — holding by default"}
+        if not self.api_key:
+            return default
+
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        prompt = f"""You are a prediction market risk manager. The bot is considering exiting a position.
+
+MARKET: {question}
+ENTRY PRICE: ${entry_price:.3f} (our cost basis)
+CURRENT PRICE: ${current_price:.3f} (market mid)
+BEST BID: ${best_bid:.3f} | BEST ASK: ${best_ask:.3f}
+UNREALIZED P&L: {pnl_pct:+.1f}%
+HOLD TIME: {hold_hours:.1f} hours
+EXIT TRIGGER: {exit_trigger}
+
+KEY QUESTION: What is the TRUE probability of this event occurring?
+- If true probability > current price → the market is UNDERPRICING this → HOLD (we have edge)
+- If true probability < current price → the market is OVERPRICING this → SELL (cut loss)
+- If true probability ≈ current price → no edge → SELL at break-even if possible
+
+CONTEXT:
+- We bought this as a market maker at ${entry_price:.3f}
+- TIMEOUT means our sell order didn't fill in time — NOT an emergency
+- STOP_LOSS means price dropped 3%+ — could be temporary dip or real move
+- SELL_FAILED means CLOB rejected our sell orders — technical issue, not market issue
+
+Respond ONLY with valid JSON (no markdown):
+{{"action":"HOLD","true_probability":0.85,"sell_price":0.83,"reason":"one sentence"}}
+
+action: "HOLD" to keep position, "SELL" to exit
+true_probability: your estimate of true probability (0.0-1.0)
+sell_price: if SELL, what price to target (use best_bid if urgent, entry_price for break-even)
+reason: brief explanation
+
+Be data-driven. If the event is very likely (>80% true prob), holding is usually correct even if the sell didn't fill."""
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{GEMINI_API_URL}?key={self.api_key}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 150}
+                }
+                async with session.post(url, json=payload, timeout=10) as resp:
+                    self._request_count += 1
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if text.startswith("```"):
+                            text = text.split("```")[1]
+                            if text.startswith("json"):
+                                text = text[4:]
+                        result = json.loads(text.strip())
+                        result.setdefault("action", "HOLD")
+                        result.setdefault("true_probability", current_price)
+                        result.setdefault("sell_price", entry_price)
+                        result.setdefault("reason", "")
+                        # Safety: never sell below 90% of entry regardless of AI
+                        if result["action"] == "SELL":
+                            min_price = entry_price * 0.90
+                            if result["sell_price"] < min_price:
+                                result["sell_price"] = min_price
+                        return result
+                    else:
+                        return default
+        except Exception as e:
+            print(f"[GEMINI] Exit eval error: {e}")
+            return default
+
     def get_usage_stats(self) -> dict:
         """Get API usage stats."""
         return {

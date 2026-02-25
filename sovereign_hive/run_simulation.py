@@ -1815,37 +1815,40 @@ class TradingEngine:
             # Track sell retry attempts to avoid infinite loop
             sell_retries = position.get("sell_retries", 0)
             if sell_retries >= 5:
-                # NegRisk balance/allowance bug — resync and retry instead of dumping
+                # NegRisk balance/allowance bug — resync and retry first
                 if self.live and hasattr(self.executor, '_resync_negrisk_balance'):
                     try:
                         await self.executor._resync_negrisk_balance(token_id)
-                        position["sell_retries"] = 0  # Reset — try again with fresh allowance
+                        position["sell_retries"] = 0
                         self.portfolio._save()
                         print(f"[MM-LIVE] SELL FAILED 5x — resynced NegRisk balance, will retry")
                         return
                     except Exception as e:
                         print(f"[MM-LIVE] NegRisk resync failed: {e}")
-                # If resync didn't help or not available, post at entry price (break-even)
-                # NEVER dump below entry — keep capital, don't give it away
-                exit_price = position["entry_price"]
-                result = await self.executor.post_limit_order(
-                    token_id=token_id, side="SELL", price=exit_price,
-                    size=round(position["shares"], 2), post_only=False
-                )
-                exit_order_id = result.get("orderID", "")
-                if exit_order_id:
-                    position["live_state"] = "EXIT_PENDING"
-                    position["exit_order_id"] = exit_order_id
-                    position["exit_reason"] = "MM_SELL_FAILED"
-                    position["exit_limit_price"] = exit_price
-                    position.pop("sell_retries", None)
-                    self.portfolio._save()
-                    print(f"[MM-LIVE] SELL FAILED 5x — posting break-even exit @ ${exit_price:.3f}")
+                # Resync didn't help — ask AI what to do and at what price
+                ai_exit = await self._ai_exit_decision(position, "SELL_FAILED")
+                if ai_exit["action"] == "SELL":
+                    exit_price = ai_exit["sell_price"]
+                    result = await self.executor.post_limit_order(
+                        token_id=token_id, side="SELL", price=exit_price,
+                        size=round(position["shares"], 2), post_only=False
+                    )
+                    exit_order_id = result.get("orderID", "")
+                    if exit_order_id:
+                        position["live_state"] = "EXIT_PENDING"
+                        position["exit_order_id"] = exit_order_id
+                        position["exit_reason"] = "MM_SELL_FAILED"
+                        position["exit_limit_price"] = exit_price
+                        position.pop("sell_retries", None)
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] AI EXIT @ ${exit_price:.3f}: {ai_exit['reason']}")
+                    else:
+                        position["sell_retries"] = 0
+                        self.portfolio._save()
                 else:
-                    # Can't even post the order — keep position, reset retries, try next cycle
                     position["sell_retries"] = 0
                     self.portfolio._save()
-                    print(f"[MM-LIVE] SELL FAILED 5x — couldn't post exit, will retry next cycle")
+                    print(f"[MM-LIVE] AI HOLD: {ai_exit['reason']} (true_prob={ai_exit['true_probability']:.2f})")
                 return
 
             shares = position["shares"]
@@ -1896,47 +1899,40 @@ class TradingEngine:
             pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
 
             if pnl_pct <= -0.03:
-                # STOP LOSS: Cancel sell, post exit order, wait for CLOB confirmation
-                await self.executor.cancel_order(sell_order_id)
-                book = await self.executor.get_order_book(token_id)
-                bids = book.get("bids", [])
-                exit_price = bids[0][0] if bids else current_price * 0.99
-                # Safety floor: never sell below 90% of entry price
-                # A 3% stop-loss should exit at ~97% of entry, not 50% or 1%
-                min_exit = position["entry_price"] * 0.90
-                if exit_price < min_exit:
-                    exit_price = min_exit
-                    print(f"[MM-LIVE] STOP: bid ${bids[0][0] if bids else 0:.3f} below floor, using ${exit_price:.3f}")
-                result = await self.executor.post_limit_order(
-                    token_id=token_id, side="SELL",
-                    price=exit_price, size=round(position["shares"], 2),
-                    post_only=False  # Allow taker to exit fast
-                )
-                exit_order_id = result.get("orderID", "")
-                if exit_order_id:
-                    # Don't record trade yet — wait for CLOB to confirm fill
-                    position["live_state"] = "EXIT_PENDING"
-                    position["exit_order_id"] = exit_order_id
-                    position["exit_reason"] = "MM_STOP"
-                    position["exit_limit_price"] = exit_price
-                    self.portfolio._save()
-                    print(f"[MM-LIVE] STOP EXIT POSTED @ ${exit_price:.3f}, waiting for fill confirmation...")
-
-            elif hold_hours >= CONFIG["mm_max_hold_hours"]:
-                # TIMEOUT: Sell didn't fill in time. NEVER sell at a loss on timeout.
-                # The asset still has value — just keep the sell order posted.
-                # Only exit at break-even or better.
-                book = await self.executor.get_order_book(token_id)
-                bids = book.get("bids", [])
-                best_bid = bids[0][0] if bids else 0
-                entry = position["entry_price"]
-
-                if best_bid >= entry:
-                    # Can exit at break-even or profit — do it
+                # STOP LOSS: Ask AI whether to exit and at what price
+                ai_exit = await self._ai_exit_decision(position, "STOP_LOSS")
+                if ai_exit["action"] == "SELL":
                     await self.executor.cancel_order(sell_order_id)
+                    exit_price = ai_exit["sell_price"]
                     result = await self.executor.post_limit_order(
                         token_id=token_id, side="SELL",
-                        price=entry, size=round(position["shares"], 2),
+                        price=exit_price, size=round(position["shares"], 2),
+                        post_only=False  # Allow taker to exit fast
+                    )
+                    exit_order_id = result.get("orderID", "")
+                    if exit_order_id:
+                        position["live_state"] = "EXIT_PENDING"
+                        position["exit_order_id"] = exit_order_id
+                        position["exit_reason"] = "MM_STOP"
+                        position["exit_limit_price"] = exit_price
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] AI STOP EXIT @ ${exit_price:.3f}: {ai_exit['reason']}")
+                else:
+                    # AI says HOLD — price drop is temporary, true prob still supports our position
+                    # Reset timer to avoid re-triggering immediately
+                    position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] AI STOP HOLD: {ai_exit['reason']} (true_prob={ai_exit['true_probability']:.2f})")
+
+            elif hold_hours >= CONFIG["mm_max_hold_hours"]:
+                # TIMEOUT: Sell didn't fill in time. Ask AI whether to exit and at what price.
+                ai_exit = await self._ai_exit_decision(position, "TIMEOUT")
+                if ai_exit["action"] == "SELL":
+                    await self.executor.cancel_order(sell_order_id)
+                    exit_price = ai_exit["sell_price"]
+                    result = await self.executor.post_limit_order(
+                        token_id=token_id, side="SELL",
+                        price=exit_price, size=round(position["shares"], 2),
                         post_only=False
                     )
                     exit_order_id = result.get("orderID", "")
@@ -1944,15 +1940,14 @@ class TradingEngine:
                         position["live_state"] = "EXIT_PENDING"
                         position["exit_order_id"] = exit_order_id
                         position["exit_reason"] = "MM_TIMEOUT"
-                        position["exit_limit_price"] = entry
+                        position["exit_limit_price"] = exit_price
                         self.portfolio._save()
-                        print(f"[MM-LIVE] TIMEOUT: bid ${best_bid:.3f} >= entry ${entry:.3f}, exiting at break-even")
+                        print(f"[MM-LIVE] AI TIMEOUT EXIT @ ${exit_price:.3f}: {ai_exit['reason']}")
                 else:
-                    # Best bid is below entry — DO NOT SELL. Keep the sell order up.
-                    # Reset the timer. The stop-loss (-3%) handles real emergencies.
+                    # AI says HOLD — the position still has edge, keep sell order posted
                     position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
                     self.portfolio._save()
-                    print(f"[MM-LIVE] TIMEOUT HOLD: bid ${best_bid:.3f} < entry ${entry:.3f}, keeping sell @ ${mm_ask:.3f} (stop-loss protects downside)")
+                    print(f"[MM-LIVE] AI TIMEOUT HOLD: {ai_exit['reason']} (true_prob={ai_exit['true_probability']:.2f})")
 
             elif status.get("status") in ("CANCELLED", "CANCELED"):
                 # Sell order cancelled externally - re-enter BUY_FILLED to repost
@@ -2069,6 +2064,77 @@ class TradingEngine:
         except Exception as e:
             print(f"[AI-REENTRY] Error: {e} — blocking re-entry")
             return False
+
+    async def _ai_exit_decision(self, position: dict, exit_trigger: str) -> dict:
+        """
+        Ask Gemini AI whether to HOLD or SELL, and at what price.
+
+        Args:
+            position: The position dict with entry_price, question, token_id, etc.
+            exit_trigger: "TIMEOUT" | "STOP_LOSS" | "SELL_FAILED"
+
+        Returns:
+            {"action": "HOLD"|"SELL", "true_probability": float, "sell_price": float, "reason": str}
+        """
+        default = {
+            "action": "HOLD",
+            "true_probability": position.get("entry_price", 0.5),
+            "sell_price": position.get("entry_price", 0.5),
+            "reason": "No AI available — holding by default",
+        }
+        if not self.gemini:
+            return default
+
+        # Gather context for AI
+        entry_price = position["entry_price"]
+        question = position.get("question", "Unknown market")
+        token_id = position.get("token_id", "")
+        current_price = await self._get_market_price(
+            position.get("condition_id", ""), position
+        )
+        if current_price is None:
+            current_price = entry_price
+
+        entry_time = position.get("mm_entry_time", position.get("entry_time", ""))
+        hold_hours = 0
+        if entry_time:
+            try:
+                entered = datetime.fromisoformat(entry_time)
+                hold_hours = (datetime.now(timezone.utc) - entered).total_seconds() / 3600
+            except Exception:
+                pass
+
+        # Get order book for best bid/ask
+        best_bid, best_ask = 0.0, 1.0
+        if self.live and self.executor and token_id:
+            try:
+                book = await self.executor.get_order_book(token_id)
+                bids = book.get("bids", [])
+                asks = book.get("asks", [])
+                best_bid = bids[0][0] if bids else 0.0
+                best_ask = asks[0][0] if asks else 1.0
+            except Exception:
+                pass
+
+        try:
+            result = await self.gemini.evaluate_exit(
+                question=question,
+                entry_price=entry_price,
+                current_price=current_price,
+                hold_hours=hold_hours,
+                exit_trigger=exit_trigger,
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
+            action = result.get("action", "HOLD")
+            true_prob = result.get("true_probability", current_price)
+            sell_price = result.get("sell_price", entry_price)
+            reason = result.get("reason", "")
+            print(f"[AI-EXIT] {question[:40]}... trigger={exit_trigger} → {action} (true_prob={true_prob:.2f}, sell=${sell_price:.3f}): {reason}")
+            return result
+        except Exception as e:
+            print(f"[AI-EXIT] Error: {e} — holding by default")
+            return default
 
     async def evaluate_opportunity(self, opp: dict) -> bool:
         """Evaluate if we should trade an opportunity."""
