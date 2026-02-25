@@ -1803,21 +1803,22 @@ class TestOnChainBalanceSync:
         assert live_engine.portfolio.balance == pytest.approx(13.38, abs=0.01)
 
     @pytest.mark.asyncio
-    async def test_does_not_correct_when_orders_pending(self, live_engine):
-        """Does NOT correct when BUY_PENDING orders exist — wallet is wrong."""
+    async def test_syncs_even_when_orders_pending(self, live_engine):
+        """ALWAYS syncs — CLOB buys are off-chain, wallet is truth."""
         live_engine.portfolio.balance = 15.82
-        # Add a pending buy order
+        # Add a pending buy order (cost_basis = $10)
         live_engine.portfolio.buy(
             condition_id="0xtest", question="Test?", side="MM",
             price=0.80, amount=10.0, reason="test", strategy="MARKET_MAKER",
         )
         live_engine.portfolio.positions["0xtest"]["live_state"] = "BUY_PENDING"
-        live_engine.executor.get_balance_usdc.return_value = 5.82  # Wallet lower due to locked USDC
+        # On-chain shows $50 (e.g. user deposited money)
+        live_engine.executor.get_balance_usdc.return_value = 50.00
 
         await live_engine._log_on_chain_balance()
 
-        # Balance must NOT change — orders are pending
-        assert live_engine.portfolio.balance == pytest.approx(5.82, abs=0.01)
+        # correct_balance = on_chain(50) - pending_cost(10) = 40
+        assert live_engine.portfolio.balance == pytest.approx(40.00, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_rpc_failure_preserves_state(self, live_engine):
@@ -1841,8 +1842,8 @@ class TestOnChainBalanceSync:
         assert live_engine.portfolio.balance == pytest.approx(13.00, abs=0.01)
 
     @pytest.mark.asyncio
-    async def test_accounts_for_clob_locked_funds(self, live_engine):
-        """Drift calculation accounts for USDC locked in BUY_PENDING orders."""
+    async def test_accounts_for_pending_buy_cost(self, live_engine):
+        """Balance = on_chain - pending buy cost_basis."""
         live_engine.portfolio.balance = 20.00
         live_engine.portfolio.buy(
             condition_id="0xtest", question="Test?", side="MM",
@@ -1850,12 +1851,12 @@ class TestOnChainBalanceSync:
         )
         live_engine.portfolio.positions["0xtest"]["live_state"] = "BUY_PENDING"
 
-        # Wallet shows $10 (because $10 is locked on CLOB)
-        live_engine.executor.get_balance_usdc.return_value = 10.00
+        # On-chain still $20 (CLOB buys don't move USDC)
+        live_engine.executor.get_balance_usdc.return_value = 20.00
 
         await live_engine._log_on_chain_balance()
 
-        # Balance must NOT change
+        # correct_balance = on_chain(20) - pending_cost(10) = 10
         assert live_engine.portfolio.balance == pytest.approx(10.00, abs=0.01)
 
     @pytest.mark.asyncio

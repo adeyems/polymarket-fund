@@ -2873,19 +2873,21 @@ class TradingEngine:
             self.portfolio._save()
             print(f"[RECONCILE] Cleaned {ghosts_cleaned} ghost positions")
 
-        # Now sync balance to on-chain (after ghost cleanup, pending orders are real)
+        # ALWAYS sync balance to on-chain (CLOB buys are off-chain, don't move USDC)
         try:
             on_chain = await self.executor.get_balance_usdc()
             if on_chain is not None:
-                has_pending = any(
-                    p.get("live_state") in ("BUY_PENDING", "EXIT_PENDING")
+                pending_cost = sum(
+                    p.get("cost_basis", 0)
                     for p in self.portfolio.positions.values()
+                    if p.get("live_state") == "BUY_PENDING"
                 )
-                if not has_pending and abs(on_chain - self.portfolio.balance) > 0.50:
+                correct_balance = round(on_chain - pending_cost, 2)
+                if abs(correct_balance - self.portfolio.balance) > 0.50:
                     old = self.portfolio.balance
-                    self.portfolio.balance = on_chain
+                    self.portfolio.balance = correct_balance
                     self.portfolio._save()
-                    print(f"[RECONCILE] Balance synced: ${old:.2f} → ${on_chain:.2f}")
+                    print(f"[RECONCILE] Balance synced: ${old:.2f} → ${correct_balance:.2f} (on-chain=${on_chain:.2f}, pending=${pending_cost:.2f})")
                 else:
                     print(f"[RECONCILE] Balance: ${self.portfolio.balance:.2f} (on-chain: ${on_chain:.2f})")
         except Exception as e:
@@ -2894,45 +2896,35 @@ class TradingEngine:
     async def _log_on_chain_balance(self):
         """Sync on-chain balance with internal state.
 
-        Safe auto-correction: ONLY when no orders are in flight (BUY_PENDING
-        or EXIT_PENDING states), the on-chain wallet IS the truth.
-
-        When orders ARE open, wallet balance differs from internal because
-        USDC is locked on the CLOB. In that case, just log the drift.
+        ALWAYS sync: on-chain USDC is the source of truth. CLOB buy orders
+        are off-chain intents — they do NOT move USDC from the wallet.
+        Internal balance = on_chain - sum(cost_basis of BUY_PENDING positions).
         """
         try:
             on_chain = await self.executor.get_balance_usdc()
             if on_chain is None:
                 return
 
-            internal_balance = self.portfolio.balance
-            # Check if any orders are in flight (makes wallet != internal)
-            has_pending_orders = any(
-                pos.get("live_state") in ("BUY_PENDING", "EXIT_PENDING")
+            # Internal balance should be: on-chain minus cost of pending buys
+            pending_cost = sum(
+                pos.get("cost_basis", 0)
                 for pos in self.portfolio.positions.values()
+                if pos.get("live_state") == "BUY_PENDING"
             )
-            # Estimate CLOB-locked funds
-            clob_locked = 0.0
-            for pos in self.portfolio.positions.values():
-                if pos.get("live_state") == "BUY_PENDING":
-                    clob_locked += pos.get("cost_basis", 0)
+            correct_balance = round(on_chain - pending_cost, 2)
+            drift = abs(correct_balance - self.portfolio.balance)
 
-            expected_wallet = internal_balance - clob_locked
-            drift = on_chain - expected_wallet
-
-            if abs(drift) > 1.00:
-                if has_pending_orders:
-                    # Orders in flight — can't trust wallet as source of truth
-                    print(f"[CHAIN] DRIFT: wallet=${on_chain:.2f}, expected=${expected_wallet:.2f} (orders pending, not correcting)")
-                else:
-                    # No orders in flight — wallet IS truth, correct internal balance
-                    # This handles: redemptions, external deposits, resolved positions
-                    old_balance = self.portfolio.balance
-                    self.portfolio.balance = on_chain
-                    self.portfolio._save()
-                    print(f"[CHAIN] CORRECTED: ${old_balance:.2f} → ${on_chain:.2f} (drift=${drift:+.2f}, no orders pending)")
+            if drift > 0.50:
+                old_balance = self.portfolio.balance
+                self.portfolio.balance = correct_balance
+                self.portfolio._save()
+                reason = ""
+                if correct_balance > old_balance + 5:
+                    reason = " (deposit detected!)"
+                print(f"[CHAIN] SYNCED: ${old_balance:.2f} → ${correct_balance:.2f} "
+                      f"(on-chain=${on_chain:.2f}, pending_buys=${pending_cost:.2f}){reason}")
             else:
-                print(f"[CHAIN] OK: wallet=${on_chain:.2f}, internal=${internal_balance:.2f}, locked=${clob_locked:.2f}")
+                print(f"[CHAIN] OK: wallet=${on_chain:.2f}, internal=${self.portfolio.balance:.2f}, pending=${pending_cost:.2f}")
         except Exception as e:
             print(f"[CHAIN] Error: {e}")
 

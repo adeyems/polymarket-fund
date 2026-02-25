@@ -83,7 +83,7 @@ result = {
     "sell_order_shares_value": 0.0,
     "total_shares_value": 0.0,
     "total_assets": 0.0,
-    "starting_balance": 20.0,
+    "starting_balance": 82.88,
     "pnl": 0.0,
     "errors": [],
     "actions_needed": [],
