@@ -38,6 +38,32 @@ Based on your analysis, write specific actionable recommendations:
 
 Be specific. "DIP_BUY is buying at 0.35-0.45 which has negative Kelly — the entry price filter needs to exclude this range" is useful. "DIP_BUY needs improvement" is not.
 
+## STEP 3.5: MARKET INTELLIGENCE (WEB SEARCH)
+
+For each open position across ALL strategies (paper and live), use **WebSearch** to check:
+
+1. **Has the underlying event occurred?** Search for the event name + "result" + year.
+   - Sports: match scores, cancellations, walkovers, postponements
+   - Politics: election results, legislative decisions, deadline outcomes
+   - Economics: data releases (CPI, GDP, jobs reports), central bank decisions
+
+2. **Are there developments that could affect resolution timing?**
+   - Upcoming deadlines that our positions depend on
+   - News that shifts probability dramatically (should we expect stop-loss triggers?)
+
+3. **Cross-reference with Gamma API:**
+   For any position where you find a definitive result via web, check if Polymarket has resolved it yet:
+   ```bash
+   curl -s "https://gamma-api.polymarket.com/markets?conditionId=<cid>" | python3 -c "import sys,json; d=json.load(sys.stdin); m=d[0] if d else {}; print(m.get('resolved'), m.get('outcomePrices'))"
+   ```
+
+4. **Flag actionable findings:**
+   - Positions where the event has occurred but Polymarket hasn't resolved yet → flag in report
+   - Sports cancellations/walkovers → note expected 50-50 resolution
+   - Positions near resolution deadline → note urgency
+
+Include web findings in your daily report under a "Market Intelligence" section.
+
 ## STEP 4: CODE REVIEW
 
 Read the main trading engine (sovereign_hive/run_simulation.py) and scan for:

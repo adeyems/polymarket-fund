@@ -77,7 +77,7 @@ PROMPT=$(cat "$PROMPT_FILE")
 # --model opus: full reasoning power for diagnosis
 claude -p "$PROMPT" \
   --model opus \
-  --allowedTools "Bash,Read,Write,Edit,Grep,Glob" \
+  --allowedTools "Bash,Read,Write,Edit,Grep,Glob,WebFetch,WebSearch" \
   >> "$MONITOR_LOG" 2>&1
 
 echo "Remote monitor run complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$MONITOR_LOG"

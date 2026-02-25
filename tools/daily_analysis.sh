@@ -47,7 +47,7 @@ PROMPT=$(cat "$PROMPT_FILE")
 # Use Opus for deep strategic analysis (Max subscription, no budget cap)
 claude -p "$PROMPT" \
   --model opus \
-  --allowedTools "Bash,Read,Write,Edit,Grep,Glob" \
+  --allowedTools "Bash,Read,Write,Edit,Grep,Glob,WebFetch,WebSearch" \
   >> "$ANALYSIS_LOG" 2>&1
 
 echo "Daily analysis complete: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$ANALYSIS_LOG"
