@@ -78,7 +78,7 @@ CONFIG = {
     "mm_min_volume_24h": 5000,       # $5k+ volume
     "mm_min_liquidity": 10000,       # $10k+ liquidity
     "mm_target_profit": 0.015,       # 1.5% default (AI overrides per-market)
-    "mm_max_hold_hours": 2,          # Exit after 2h
+    "mm_max_hold_hours": 4,          # Exit after 4h (was 2h, too short for maker sells)
     "mm_price_range": (0.50, 0.70),  # SWEET SPOT: Kelly +29-48%, ROI +23-26% (was 0.05-0.95)
     "mm_fallback_range": (0.80, 0.95),  # SECONDARY: Kelly +4-20%, smaller edge
     "mm_max_days_to_resolve": 30,    # 15-30d optimal, 30d cap works
@@ -957,6 +957,22 @@ class MarketScanner:
                 negative_categories = ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana"]
                 is_negative_category = any(kw in q_lower for kw in negative_categories)
 
+                # SPORTS FILTER: Sports markets have higher variance, all 3 MM stops
+                # came from sports. Tennis/LoL/soccer dips are real info, not mispricing.
+                # Use word-boundary matching to avoid false positives (e.g. "inflation" matching "nfl")
+                import re
+                _q_words = set(re.findall(r'[a-z0-9]+', q_lower))
+                sports_exact = {"tennis", "atp", "wta", "soccer", "football",
+                                "nba", "nfl", "nhl", "mlb", "cricket", "ipl",
+                                "mls", "esports", "csgo", "dota", "lol"}
+                sports_phrases = [
+                    "grand slam", "premier league", "champions league",
+                    "la liga", "serie a", "bundesliga", "ligue 1",
+                    "league of legends", " vs ",
+                    "game 1", "game 2", "game 3",
+                ]
+                is_sports = bool(_q_words & sports_exact) or any(p in q_lower for p in sports_phrases)
+
                 # TWO-ZONE PRICE FILTER (data-driven from 88.5M trades)
                 # Sweet spot: 0.50-0.70 (Kelly +29-48%, ROI +23-26%)
                 # Fallback: 0.80-0.95 (Kelly +4-20%, smaller edge)
@@ -971,7 +987,7 @@ class MarketScanner:
                 mm_pass_bid = best_bid > 0
                 mm_pass_vol = volume_24h >= CONFIG["mm_min_volume_24h"]
                 mm_pass_liq = liquidity >= CONFIG["mm_min_liquidity"]
-                if (not is_meme_market and mm_pass_price and mm_pass_bid and mm_pass_vol and mm_pass_liq):
+                if (not is_meme_market and not is_sports and mm_pass_price and mm_pass_bid and mm_pass_vol and mm_pass_liq):
 
                     spread = best_ask - best_bid
                     spread_pct = spread / ((best_ask + best_bid) / 2) if (best_ask + best_bid) > 0 else 0
@@ -1799,16 +1815,37 @@ class TradingEngine:
             # Track sell retry attempts to avoid infinite loop
             sell_retries = position.get("sell_retries", 0)
             if sell_retries >= 5:
-                # Give up on post-only, exit at market to avoid being stuck
-                current_price = await self._get_market_price(condition_id, position)
-                if current_price and current_price > 0:
-                    sell_failed_fee = polymarket_taker_fee(current_price)
-                    result = self.portfolio.sell(condition_id, current_price, "MM_SELL_FAILED", fee_pct=sell_failed_fee)
-                    if result["success"]:
-                        trade = result["trade"]
-                        if self.live:
-                            self.safety.record_trade_pnl(trade["pnl"])
-                        print(f"[MM-LIVE] SELL FAILED after 5 retries, exiting: ${trade['pnl']:+.2f}")
+                # NegRisk balance/allowance bug — resync and retry instead of dumping
+                if self.live and hasattr(self.executor, '_resync_negrisk_balance'):
+                    try:
+                        await self.executor._resync_negrisk_balance(token_id)
+                        position["sell_retries"] = 0  # Reset — try again with fresh allowance
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] SELL FAILED 5x — resynced NegRisk balance, will retry")
+                        return
+                    except Exception as e:
+                        print(f"[MM-LIVE] NegRisk resync failed: {e}")
+                # If resync didn't help or not available, post at entry price (break-even)
+                # NEVER dump below entry — keep capital, don't give it away
+                exit_price = position["entry_price"]
+                result = await self.executor.post_limit_order(
+                    token_id=token_id, side="SELL", price=exit_price,
+                    size=round(position["shares"], 2), post_only=False
+                )
+                exit_order_id = result.get("orderID", "")
+                if exit_order_id:
+                    position["live_state"] = "EXIT_PENDING"
+                    position["exit_order_id"] = exit_order_id
+                    position["exit_reason"] = "MM_SELL_FAILED"
+                    position["exit_limit_price"] = exit_price
+                    position.pop("sell_retries", None)
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] SELL FAILED 5x — posting break-even exit @ ${exit_price:.3f}")
+                else:
+                    # Can't even post the order — keep position, reset retries, try next cycle
+                    position["sell_retries"] = 0
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] SELL FAILED 5x — couldn't post exit, will retry next cycle")
                 return
 
             shares = position["shares"]
@@ -1864,8 +1901,9 @@ class TradingEngine:
                 book = await self.executor.get_order_book(token_id)
                 bids = book.get("bids", [])
                 exit_price = bids[0][0] if bids else current_price * 0.99
-                # Safety floor: never sell below 50% of entry price
-                min_exit = position["entry_price"] * 0.50
+                # Safety floor: never sell below 90% of entry price
+                # A 3% stop-loss should exit at ~97% of entry, not 50% or 1%
+                min_exit = position["entry_price"] * 0.90
                 if exit_price < min_exit:
                     exit_price = min_exit
                     print(f"[MM-LIVE] STOP: bid ${bids[0][0] if bids else 0:.3f} below floor, using ${exit_price:.3f}")
@@ -1885,33 +1923,36 @@ class TradingEngine:
                     print(f"[MM-LIVE] STOP EXIT POSTED @ ${exit_price:.3f}, waiting for fill confirmation...")
 
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
-                # TIMEOUT: Cancel sell, post exit order, wait for CLOB confirmation
-                await self.executor.cancel_order(sell_order_id)
+                # TIMEOUT: Sell didn't fill in time. NEVER sell at a loss on timeout.
+                # The asset still has value — just keep the sell order posted.
+                # Only exit at break-even or better.
                 book = await self.executor.get_order_book(token_id)
                 bids = book.get("bids", [])
-                exit_price = bids[0][0] if bids else current_price * 0.99
-                # Safety floor: never sell below 50% of entry price (prevents fire-sale on thin books)
-                min_exit = position["entry_price"] * 0.50
-                if exit_price < min_exit:
-                    print(f"[MM-LIVE] TIMEOUT BLOCKED: best bid ${exit_price:.3f} below floor ${min_exit:.3f}, keeping sell at ${mm_ask:.3f}")
-                    # Don't fire-sale — repost original sell and wait for fill or stop-loss
-                    position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
-                    self.portfolio._save()
-                else:
+                best_bid = bids[0][0] if bids else 0
+                entry = position["entry_price"]
+
+                if best_bid >= entry:
+                    # Can exit at break-even or profit — do it
+                    await self.executor.cancel_order(sell_order_id)
                     result = await self.executor.post_limit_order(
                         token_id=token_id, side="SELL",
-                        price=exit_price, size=round(position["shares"], 2),
+                        price=entry, size=round(position["shares"], 2),
                         post_only=False
                     )
                     exit_order_id = result.get("orderID", "")
                     if exit_order_id:
-                        # Don't record trade yet — wait for CLOB to confirm fill
                         position["live_state"] = "EXIT_PENDING"
                         position["exit_order_id"] = exit_order_id
                         position["exit_reason"] = "MM_TIMEOUT"
-                        position["exit_limit_price"] = exit_price
+                        position["exit_limit_price"] = entry
                         self.portfolio._save()
-                        print(f"[MM-LIVE] TIMEOUT EXIT POSTED @ ${exit_price:.3f}, waiting for fill confirmation...")
+                        print(f"[MM-LIVE] TIMEOUT: bid ${best_bid:.3f} >= entry ${entry:.3f}, exiting at break-even")
+                else:
+                    # Best bid is below entry — DO NOT SELL. Keep the sell order up.
+                    # Reset the timer. The stop-loss (-3%) handles real emergencies.
+                    position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] TIMEOUT HOLD: bid ${best_bid:.3f} < entry ${entry:.3f}, keeping sell @ ${mm_ask:.3f} (stop-loss protects downside)")
 
             elif status.get("status") in ("CANCELLED", "CANCELED"):
                 # Sell order cancelled externally - re-enter BUY_FILLED to repost
@@ -2634,17 +2675,13 @@ class TradingEngine:
         return selected
 
     async def _log_on_chain_balance(self):
-        """Log on-chain balance vs internal for monitoring (NO auto-correction).
+        """Sync on-chain balance with internal state.
 
-        The previous _sync_on_chain_balance() auto-corrected drift, but this
-        fought with the order lifecycle:
-        - BUY posted → USDC leaves wallet → sync "corrects" balance down
-        - BUY cancelled → USDC returns AND bot restores cost_basis → double-counted
-        - This gave phantom buying power and caused -$14.77 real loss.
+        Safe auto-correction: ONLY when no orders are in flight (BUY_PENDING
+        or EXIT_PENDING states), the on-chain wallet IS the truth.
 
-        Now we only LOG the comparison. The monitor/human decides if correction
-        is needed. Wallet balance != internal balance when orders are open
-        (USDC is locked on CLOB, not in wallet).
+        When orders ARE open, wallet balance differs from internal because
+        USDC is locked on the CLOB. In that case, just log the drift.
         """
         try:
             on_chain = await self.executor.get_balance_usdc()
@@ -2652,7 +2689,12 @@ class TradingEngine:
                 return
 
             internal_balance = self.portfolio.balance
-            # Estimate CLOB-locked funds (open BUY positions in BUY_PENDING state)
+            # Check if any orders are in flight (makes wallet != internal)
+            has_pending_orders = any(
+                pos.get("live_state") in ("BUY_PENDING", "EXIT_PENDING")
+                for pos in self.portfolio.positions.values()
+            )
+            # Estimate CLOB-locked funds
             clob_locked = 0.0
             for pos in self.portfolio.positions.values():
                 if pos.get("live_state") == "BUY_PENDING":
@@ -2662,7 +2704,16 @@ class TradingEngine:
             drift = on_chain - expected_wallet
 
             if abs(drift) > 1.00:
-                print(f"[CHAIN] DRIFT: wallet=${on_chain:.2f}, expected=${expected_wallet:.2f} (internal=${internal_balance:.2f} - locked=${clob_locked:.2f}), drift=${drift:+.2f}")
+                if has_pending_orders:
+                    # Orders in flight — can't trust wallet as source of truth
+                    print(f"[CHAIN] DRIFT: wallet=${on_chain:.2f}, expected=${expected_wallet:.2f} (orders pending, not correcting)")
+                else:
+                    # No orders in flight — wallet IS truth, correct internal balance
+                    # This handles: redemptions, external deposits, resolved positions
+                    old_balance = self.portfolio.balance
+                    self.portfolio.balance = on_chain
+                    self.portfolio._save()
+                    print(f"[CHAIN] CORRECTED: ${old_balance:.2f} → ${on_chain:.2f} (drift=${drift:+.2f}, no orders pending)")
             else:
                 print(f"[CHAIN] OK: wallet=${on_chain:.2f}, internal=${internal_balance:.2f}, locked=${clob_locked:.2f}")
         except Exception as e:

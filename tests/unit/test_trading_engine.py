@@ -1577,47 +1577,46 @@ class TestFireSalePrevention:
             assert exit_price >= 0.40, f"Exit price {exit_price} is below 50% floor"
 
     @pytest.mark.asyncio
-    async def test_timeout_blocked_when_bid_below_floor(self, live_engine):
-        """Timeout exit is BLOCKED when best bid is below 50% floor."""
+    async def test_timeout_holds_when_bid_below_entry(self, live_engine):
+        """Timeout HOLDS position when best bid is below entry price — never sells at a loss on timeout."""
         condition_id = "0xtimeout_blocked"
         pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
 
-        # Sell order still live
         live_engine.executor.get_order_status.return_value = {
             "status": "LIVE", "size_matched": 0, "original_size": 12.5,
         }
-        # Price hasn't dropped enough for stop loss
         with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.79):
-            # Book has very thin bids below floor
+            # Book has bids below entry ($0.80)
             live_engine.executor.get_order_book.return_value = {
                 "bids": [(0.10, 5.0)], "asks": [(0.85, 50.0)]
             }
 
             await live_engine._check_mm_exit_live(condition_id, pos)
 
-        # Should NOT have posted any exit order (blocked by floor)
+        # Should NOT have posted any exit order — hold, don't dump
         live_engine.executor.post_limit_order.assert_not_called()
+        # Should NOT have cancelled the sell order — keep it posted
+        live_engine.executor.cancel_order.assert_not_called()
         # Position should still exist
         assert condition_id in live_engine.portfolio.positions
-        # Timer should have been reset (mm_entry_time updated)
+        # Timer should have been reset
         new_entry_time = datetime.fromisoformat(pos["mm_entry_time"])
-        # Should be very recent (within last few seconds)
         age = (datetime.now(timezone.utc) - new_entry_time).total_seconds()
         assert age < 5, f"Timer was not reset, age={age}s"
 
     @pytest.mark.asyncio
-    async def test_timeout_proceeds_when_bid_above_floor(self, live_engine):
-        """Timeout exit proceeds normally when best bid is above 50% floor."""
+    async def test_timeout_exits_at_breakeven_when_bid_above_entry(self, live_engine):
+        """Timeout exits at break-even when best bid >= entry price."""
         condition_id = "0xtimeout_ok"
         pos = self._make_sell_pending_position(live_engine, condition_id, entry_price=0.80, hold_hours=5)
 
         live_engine.executor.get_order_status.return_value = {
             "status": "LIVE", "size_matched": 0, "original_size": 12.5,
         }
-        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.79):
-            # Book has bids above floor ($0.40)
+        with patch.object(live_engine, '_get_market_price', new_callable=AsyncMock, return_value=0.82):
+            # Book has bids above entry price
             live_engine.executor.get_order_book.return_value = {
-                "bids": [(0.75, 50.0)], "asks": [(0.80, 50.0)]
+                "bids": [(0.81, 50.0)], "asks": [(0.83, 50.0)]
             }
             live_engine.executor.post_limit_order.return_value = {
                 "orderID": "exit-ok-001", "success": True
@@ -1625,9 +1624,11 @@ class TestFireSalePrevention:
 
             await live_engine._check_mm_exit_live(condition_id, pos)
 
-        # Should have posted exit order
+        # Should have cancelled old sell and posted exit at entry price (break-even)
         live_engine.executor.post_limit_order.assert_called_once()
-        # Position should be in EXIT_PENDING
+        call_args = live_engine.executor.post_limit_order.call_args
+        exit_price = call_args.kwargs.get("price", 0)
+        assert exit_price == 0.80, f"Exit should be at entry price, got {exit_price}"
         assert pos["live_state"] == "EXIT_PENDING"
 
 
@@ -1742,14 +1743,11 @@ class TestBuyFillPriceTracking:
 # ON-CHAIN BALANCE SYNC TESTS
 # ============================================================
 
-class TestOnChainBalanceLog:
-    """Tests for _log_on_chain_balance — LOG ONLY, never auto-correct.
+class TestOnChainBalanceSync:
+    """Tests for _log_on_chain_balance — smart auto-correction.
 
-    The original _sync_on_chain_balance auto-corrected balance drift, but
-    it fought with order lifecycle (BUY post/cancel/timeout) causing
-    double-counting that created phantom buying power → -$14.77 real loss.
-
-    Now we only LOG the drift. Balance is NEVER modified by the sync.
+    Corrects balance when no orders are in flight (safe: wallet IS truth).
+    Logs only when orders are pending (unsafe: wallet != internal due to CLOB locks).
     """
 
     @pytest.fixture
@@ -1773,15 +1771,32 @@ class TestOnChainBalanceLog:
         return engine
 
     @pytest.mark.asyncio
-    async def test_never_modifies_balance(self, live_engine):
-        """Log-only sync must NEVER change the internal balance."""
-        live_engine.portfolio.balance = 15.82
-        live_engine.executor.get_balance_usdc.return_value = 10.47  # Big drift
+    async def test_corrects_balance_when_no_orders_pending(self, live_engine):
+        """Auto-corrects when no orders in flight — wallet is truth."""
+        live_engine.portfolio.balance = 8.35
+        live_engine.executor.get_balance_usdc.return_value = 13.38  # Wallet has more (redemption happened)
 
         await live_engine._log_on_chain_balance()
 
-        # Balance must NOT change — log only
-        assert live_engine.portfolio.balance == pytest.approx(15.82, abs=0.01)
+        # Balance SHOULD be corrected to wallet value
+        assert live_engine.portfolio.balance == pytest.approx(13.38, abs=0.01)
+
+    @pytest.mark.asyncio
+    async def test_does_not_correct_when_orders_pending(self, live_engine):
+        """Does NOT correct when BUY_PENDING orders exist — wallet is wrong."""
+        live_engine.portfolio.balance = 15.82
+        # Add a pending buy order
+        live_engine.portfolio.buy(
+            condition_id="0xtest", question="Test?", side="MM",
+            price=0.80, amount=10.0, reason="test", strategy="MARKET_MAKER",
+        )
+        live_engine.portfolio.positions["0xtest"]["live_state"] = "BUY_PENDING"
+        live_engine.executor.get_balance_usdc.return_value = 5.82  # Wallet lower due to locked USDC
+
+        await live_engine._log_on_chain_balance()
+
+        # Balance must NOT change — orders are pending
+        assert live_engine.portfolio.balance == pytest.approx(5.82, abs=0.01)
 
     @pytest.mark.asyncio
     async def test_rpc_failure_preserves_state(self, live_engine):
@@ -1794,18 +1809,23 @@ class TestOnChainBalanceLog:
         assert live_engine.portfolio.balance == pytest.approx(15.82, abs=0.01)
 
     @pytest.mark.asyncio
+    async def test_no_correction_when_drift_small(self, live_engine):
+        """No correction needed when drift < $1."""
+        live_engine.portfolio.balance = 13.00
+        live_engine.executor.get_balance_usdc.return_value = 13.50  # Only $0.50 drift
+
+        await live_engine._log_on_chain_balance()
+
+        # Small drift — no correction
+        assert live_engine.portfolio.balance == pytest.approx(13.00, abs=0.01)
+
+    @pytest.mark.asyncio
     async def test_accounts_for_clob_locked_funds(self, live_engine):
         """Drift calculation accounts for USDC locked in BUY_PENDING orders."""
         live_engine.portfolio.balance = 20.00
-        # One BUY_PENDING position with $10 locked on CLOB
         live_engine.portfolio.buy(
-            condition_id="0xtest",
-            question="Test?",
-            side="MM",
-            price=0.80,
-            amount=10.0,
-            reason="test",
-            strategy="MARKET_MAKER",
+            condition_id="0xtest", question="Test?", side="MM",
+            price=0.80, amount=10.0, reason="test", strategy="MARKET_MAKER",
         )
         live_engine.portfolio.positions["0xtest"]["live_state"] = "BUY_PENDING"
 
