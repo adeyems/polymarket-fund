@@ -1871,10 +1871,19 @@ class TradingEngine:
                 self.portfolio._save()
                 print(f"[MM-LIVE] SELL POSTED @ ${mm_ask:.3f}: {position['question'][:40]}...")
             else:
+                error_msg = str(result.get("error", ""))
+                if "does not exist" in error_msg:
+                    # Orderbook gone — market resolved or delisted. Position is dead.
+                    # Close at entry price (we may have been redeemed externally).
+                    print(f"[MM-LIVE] MARKET GONE: orderbook no longer exists, closing position")
+                    sale = self.portfolio.sell(condition_id, position["entry_price"], "MM_MARKET_GONE", fee_pct=0.0)
+                    if sale["success"]:
+                        print(f"[MM-LIVE] CLOSED (market gone): ${sale['trade']['pnl']:+.2f}")
+                    return
                 # Post-only rejected (would cross spread) - retry next cycle
                 position["sell_retries"] = sell_retries + 1
                 self.portfolio._save()
-                print(f"[MM-LIVE] SELL REJECTED (attempt {sell_retries + 1}/5): {result.get('error', 'unknown')}")
+                print(f"[MM-LIVE] SELL REJECTED (attempt {sell_retries + 1}/5): {error_msg}")
 
         elif live_state == "SELL_PENDING":
             sell_order_id = position.get("sell_order_id", "")
