@@ -23,8 +23,4 @@ variable "admin_ip_cidr" {
   type        = string
 }
 
-variable "dashboard_allowed_cidrs" {
-  description = "CIDR blocks allowed to access the Dashboard API"
-  type        = list(string)
-  default     = ["0.0.0.0/0"] # Override in prod to restrict
-}
+# dashboard_allowed_cidrs removed — dashboard no longer runs on EC2

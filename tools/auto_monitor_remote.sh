@@ -50,7 +50,7 @@ if [ ! -f "$SSH_KEY" ]; then
 fi
 
 # Pre-flight: verify EC2 is reachable
-if ! ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+if ! ssh -o IdentitiesOnly=yes -i "$SSH_KEY" -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
   "$EC2_USER@$EC2_IP" "echo OK" > /dev/null 2>&1; then
   echo "$(date -u '+%Y-%m-%d %H:%M:%S UTC') - ERROR: Cannot reach EC2 at $EC2_IP" >> "$MONITOR_LOG"
   # Send Discord alert if webhook is set

@@ -47,6 +47,9 @@ htmlcov/
 # Node
 node_modules/
 
+# Dashboard cache
+dashboard/cache/*.json
+
 # OS
 .DS_Store
 Thumbs.db

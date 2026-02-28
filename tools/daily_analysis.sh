@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================
 # DAILY STRATEGIC ANALYSIS
-# Runs once daily at 8 AM UTC via launchd
+# Runs once daily at 7 AM UTC via launchd
 # Deep analysis of all trade history, strategy performance,
 # code review, and actionable recommendations.
 # Uses Opus for deeper reasoning.

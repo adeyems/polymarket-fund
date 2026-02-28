@@ -33,40 +33,7 @@ resource "aws_security_group" "ssh" {
 }
 
 # -----------------------------------------------------------------------------
-# Dashboard API Security Group (Port 8002)
+# Dashboard Security Group — REMOVED (2026-02-25)
+# Port 8002 was exposed to the internet and led to EIP-7702 wallet drain.
+# Dashboard now runs locally via SSH pull. No ports needed on EC2.
 # -----------------------------------------------------------------------------
-resource "aws_security_group" "dashboard" {
-  name        = "${var.project_name}-dashboard-sg"
-  description = "Allow Dashboard API access"
-  vpc_id      = var.vpc_id
-
-  ingress {
-    description = "Dashboard API"
-    from_port   = 8002
-    to_port     = 8002
-    protocol    = "tcp"
-    cidr_blocks = var.dashboard_allowed_cidrs
-  }
-
-  # WebSocket upgrade uses same port
-  ingress {
-    description = "HTTPS for Dashboard"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = var.dashboard_allowed_cidrs
-  }
-
-  egress {
-    description = "Allow all outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name        = "${var.project_name}-dashboard-sg"
-    Environment = var.environment
-  }
-}

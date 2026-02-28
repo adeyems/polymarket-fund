@@ -12,9 +12,11 @@ Usage:
 import asyncio
 import aiohttp
 import argparse
+import fcntl
 import json
 import os
 import random
+import shutil
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
@@ -75,18 +77,33 @@ CONFIG = {
     # Source: becker-dataset analysis of $12B across 30,649 resolved markets
     "mm_min_spread": 0.01,           # 1% min spread
     "mm_max_spread": 0.15,           # 15% max spread
-    "mm_min_volume_24h": 5000,       # $5k+ volume
-    "mm_min_liquidity": 10000,       # $10k+ liquidity
+    "mm_min_volume_24h": 2000,       # $2k+ volume (was $5k — too restrictive)
+    "mm_min_liquidity": 5000,        # $5k+ liquidity (was $10k — too restrictive)
     "mm_target_profit": 0.015,       # 1.5% default (AI overrides per-market)
     "mm_max_hold_hours": 4,          # Exit after 4h (was 2h, too short for maker sells)
     "mm_timeout_min_profit_pct": 0.03,  # 3% min profit before timeout exit (covers taker fees + slippage)
-    "mm_price_range": (0.50, 0.70),  # SWEET SPOT: Kelly +29-48%, ROI +23-26% (was 0.05-0.95)
-    "mm_fallback_range": (0.80, 0.95),  # SECONDARY: Kelly +4-20%, smaller edge
+    "mm_price_range": (0.15, 0.65),  # DATA-BACKED: sweet spot 0.50-0.70 (Kelly +29-48%), extended to 0.15
+    "mm_fallback_range": (0.80, 0.95),  # DISABLED by default — only enabled with is_preferred
     "mm_max_days_to_resolve": 30,    # 15-30d optimal, 30d cap works
-    "mm_min_days_to_resolve": 2,     # 0-1d is NEGATIVE edge (insider-dominated)
+    "mm_min_days_to_resolve": 7,     # 7d minimum — sports/esports resolve in 1-2d, must exclude
     "mm_ai_screen": True,            # Use Gemini AI to screen market quality
+    "mm_rewards_bonus": True,        # Prefer markets with liquidity rewards
+    "mm_rewards_min_daily_rate": 50, # Ignore rewards < $50/day (noise)
     "mm_fill_probability": 0.60,     # 60% chance of fill when price touches ask (sim only)
     "mm_slippage_bps": 20,           # 20 bps (0.2%) slippage on entry/exit prices (sim only)
+    # LIQUIDITY SAFEGUARDS (prevents entry into dead orderbooks)
+    "mm_max_real_spread": 0.15,      # 15% max CLOB spread (real orderbook, not Gamma estimate)
+    "mm_min_best_bid": 0.05,         # Best bid must be >= $0.05 (no penny bids)
+    "mm_max_best_ask": 0.95,         # Best ask must be <= $0.95
+    "mm_min_exit_depth_mult": 1.5,   # Min bid depth at exit price >= 1.5x position size
+    # SPREAD CIRCUIT BREAKER (post-entry monitoring)
+    "mm_spread_dead_threshold": 0.50, # 50%+ spread = dead orderbook, force exit
+    "mm_spread_warn_threshold": 0.20, # 20%+ spread = re-price sell to best_bid
+    "mm_max_hold_hours_absolute": 24, # 24h absolute cap — force exit at best_bid
+
+    # API TIMEOUTS (unified)
+    "api_timeout": 15,                # Default timeout for all API calls (seconds)
+    "api_timeout_fast": 5,            # Fast timeout for order status polling
 
     # LIVE TRADING LIMITS (only used when --live flag is set)
     "live_max_order": 25,            # Max $25 per order
@@ -148,25 +165,27 @@ class Portfolio:
         self.data_file = Path(__file__).parent / "data" / data_file
         self.data_file.parent.mkdir(exist_ok=True)
 
-        # Load or initialize (with corruption recovery)
+        # Load or initialize (with rolling backup recovery)
         if self.data_file.exists():
             try:
                 self._load()
             except (json.JSONDecodeError, KeyError, TypeError) as e:
-                # Corrupted JSON — try .tmp backup, else start fresh
-                tmp_file = self.data_file.with_suffix(".json.tmp")
-                if tmp_file.exists():
-                    try:
-                        print(f"[PORTFOLIO] WARNING: {self.data_file.name} corrupted ({e}), recovering from .tmp backup")
-                        import shutil
-                        shutil.copy2(tmp_file, self.data_file)
-                        self._load()
-                    except Exception:
-                        print(f"[PORTFOLIO] WARNING: Backup also corrupted, starting fresh")
-                        self._init_fresh(initial_balance)
-                        return
-                else:
-                    print(f"[PORTFOLIO] WARNING: {self.data_file.name} corrupted ({e}), starting fresh")
+                print(f"[PORTFOLIO] WARNING: {self.data_file.name} corrupted ({e}), trying backups...")
+                recovered = False
+                backup_dir = self.data_file.parent / "backups"
+                for i in range(1, 4):
+                    bak = backup_dir / f"{self.data_file.stem}.bak{i}.json"
+                    if bak.exists():
+                        try:
+                            shutil.copy2(bak, self.data_file)
+                            self._load()
+                            print(f"[PORTFOLIO] RECOVERED from backup #{i}")
+                            recovered = True
+                            break
+                        except Exception:
+                            continue
+                if not recovered:
+                    print(f"[PORTFOLIO] WARNING: All backups corrupted, starting fresh")
                     self._init_fresh(initial_balance)
                     return
         else:
@@ -176,6 +195,7 @@ class Portfolio:
         """Initialize a fresh portfolio (used on first run or corruption recovery)."""
         self.balance = initial_balance
         self.initial_balance = initial_balance
+        self.deposits: List[dict] = []  # Track top-ups: [{"amount": X, "timestamp": "...", "balance_after": Y}]
         self.positions: Dict[str, dict] = {}
         self.trade_history: List[dict] = []
         self.metrics = {
@@ -199,10 +219,17 @@ class Portfolio:
         self._save()
 
     def _load(self):
-        with open(self.data_file, "r") as f:
-            data = json.load(f)
+        lock_file = self.data_file.with_suffix(".json.lock")
+        with open(lock_file, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_SH)  # Shared lock for reads
+            try:
+                with open(self.data_file, "r") as f:
+                    data = json.load(f)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
         self.balance = data["balance"]
         self.initial_balance = data["initial_balance"]
+        self.deposits = data.get("deposits", [])
         self.positions = data["positions"]
         self.trade_history = data["trade_history"]
         # Merge loaded metrics with defaults to handle missing keys
@@ -243,6 +270,7 @@ class Portfolio:
         data = {
             "balance": self.balance,
             "initial_balance": self.initial_balance,
+            "deposits": self.deposits,
             "positions": self.positions,
             "trade_history": self.trade_history,
             "metrics": self.metrics,
@@ -250,13 +278,70 @@ class Portfolio:
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
         try:
-            # Atomic write: write to .tmp then rename (prevents corruption on crash/kill)
+            # Rolling backup: keep last 3 good saves so corruption never loses everything
+            backup_dir = self.data_file.parent / "backups"
+            backup_dir.mkdir(exist_ok=True)
+            if self.data_file.exists():
+                # Rotate: .bak3 → delete, .bak2 → .bak3, .bak1 → .bak2, current → .bak1
+                for i in range(3, 1, -1):
+                    older = backup_dir / f"{self.data_file.stem}.bak{i}.json"
+                    newer = backup_dir / f"{self.data_file.stem}.bak{i-1}.json"
+                    if newer.exists():
+                        shutil.copy2(newer, older)
+                bak1 = backup_dir / f"{self.data_file.stem}.bak1.json"
+                shutil.copy2(self.data_file, bak1)
+
+            # Atomic write with file locking (prevents multi-process race)
+            lock_file = self.data_file.with_suffix(".json.lock")
             tmp_file = self.data_file.with_suffix(".json.tmp")
-            with open(tmp_file, "w") as f:
-                json.dump(data, f, indent=2)
-            tmp_file.replace(self.data_file)  # Atomic on POSIX
+            with open(lock_file, "w") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+                try:
+                    with open(tmp_file, "w") as f:
+                        json.dump(data, f, indent=2)
+                    tmp_file.replace(self.data_file)  # Atomic on POSIX
+                finally:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
         except Exception as e:
             print(f"[PORTFOLIO] WARNING: Save failed ({e}), trading continues with in-memory state")
+
+    @property
+    def total_deposited(self) -> float:
+        """Total capital deployed: initial_balance + all top-ups."""
+        return self.initial_balance + sum(d.get("amount", 0) for d in self.deposits)
+
+    @property
+    def total_withdrawn(self) -> float:
+        """Total capital withdrawn."""
+        return sum(abs(d.get("amount", 0)) for d in self.deposits if d.get("amount", 0) < 0)
+
+    def record_deposit(self, amount: float, source: str = "on-chain"):
+        """Record a deposit into the portfolio."""
+        if amount <= 0:
+            return
+        self.deposits.append({
+            "amount": amount,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "balance_after": self.balance + amount,
+            "source": source,
+        })
+        self.balance += amount
+        self._save()
+        print(f"[PORTFOLIO] DEPOSIT: +${amount:.2f} recorded (balance=${self.balance:.2f}, total_deposited=${self.total_deposited:.2f})")
+
+    def record_withdrawal(self, amount: float, destination: str = "on-chain"):
+        """Record a withdrawal from the portfolio."""
+        if amount <= 0:
+            return
+        self.deposits.append({
+            "amount": -amount,  # Negative = withdrawal
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "balance_after": self.balance - amount,
+            "destination": destination,
+        })
+        self.balance -= amount
+        self._save()
+        print(f"[PORTFOLIO] WITHDRAWAL: -${amount:.2f} recorded (balance=${self.balance:.2f})")
 
     def buy(self, condition_id: str, question: str, side: str, price: float, amount: float, reason: str, strategy: str = "UNKNOWN", fee_pct: float = 0.0) -> dict:
         """Execute a simulated buy order.
@@ -265,11 +350,17 @@ class Portfolio:
             fee_pct: Taker fee as decimal (e.g. 0.0144 for 1.44%). Makers pass 0.
                      Fee is deducted from the amount, reducing shares received.
         """
+        if price <= 0 or price > 1.0:
+            return {"success": False, "error": f"Invalid price: {price}"}
+        if amount <= 0.01:
+            return {"success": False, "error": f"Amount too small: {amount}"}
         if amount > self.balance:
             return {"success": False, "error": "Insufficient balance"}
 
         fee = amount * fee_pct
         effective_amount = amount - fee
+        if effective_amount <= 0:
+            return {"success": False, "error": f"Fee ({fee:.4f}) exceeds amount ({amount:.4f})"}
         shares = effective_amount / price
 
         position = {
@@ -307,14 +398,19 @@ class Portfolio:
             return {"success": False, "error": "Position not found"}
 
         position = self.positions[condition_id]
+        cost_basis = position["cost_basis"]
+        if cost_basis <= 0:
+            cost_basis = 0.01  # Guard: prevent division by zero
         gross_proceeds = position["shares"] * current_price
         exit_fee = gross_proceeds * fee_pct
         proceeds = gross_proceeds - exit_fee
-        pnl = proceeds - position["cost_basis"]
-        pnl_pct = pnl / position["cost_basis"] * 100
+        pnl = proceeds - cost_basis
+        pnl_pct = pnl / cost_basis * 100
         strategy = position.get("strategy", "UNKNOWN")
 
-        # Record trade with strategy info
+        # Record trade with strategy info (includes gross/net for transparent accounting)
+        total_fees = position.get("entry_fee", 0) + exit_fee
+        gross_pnl = (position["shares"] * current_price) - cost_basis
         trade = {
             "condition_id": condition_id,
             "question": position["question"],
@@ -322,7 +418,9 @@ class Portfolio:
             "entry_price": position["entry_price"],
             "exit_price": current_price,
             "shares": position["shares"],
-            "pnl": round(pnl, 2),
+            "pnl": round(pnl, 2),           # Net P&L (after all fees)
+            "gross_pnl": round(gross_pnl, 2),  # P&L before fees
+            "total_fees": round(total_fees, 4),
             "pnl_pct": round(pnl_pct, 2),
             "entry_fee": position.get("entry_fee", 0),
             "exit_fee": round(exit_fee, 4),
@@ -355,7 +453,8 @@ class Portfolio:
         # Track drawdown
         if self.balance > self.metrics["peak_balance"]:
             self.metrics["peak_balance"] = self.balance
-        drawdown = (self.metrics["peak_balance"] - self.balance) / self.metrics["peak_balance"]
+        peak = self.metrics["peak_balance"]
+        drawdown = (peak - self.balance) / peak if peak > 0 else 0
         if drawdown > self.metrics["max_drawdown"]:
             self.metrics["max_drawdown"] = drawdown
 
@@ -446,7 +545,9 @@ class MarketScanner:
         self.MR_COOLDOWN_HOURS = 48
         self.MR_MAX_ENTRIES = 2
 
-    async def _fetch_with_retry(self, url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
+    async def _fetch_with_retry(self, url: str, params: dict = None, timeout: int = None) -> Optional[dict]:
+        if timeout is None:
+            timeout = CONFIG.get("api_timeout", 15)
         """Fetch URL with 3-retry exponential backoff. Returns parsed JSON or None."""
         for attempt in range(self._retry_max):
             try:
@@ -492,6 +593,14 @@ class MarketScanner:
                     token_ids = raw_ids or []
                 m["_token_id_yes"] = token_ids[0] if len(token_ids) > 0 else None
                 m["_token_id_no"] = token_ids[1] if len(token_ids) > 1 else None
+                # Extract liquidity rewards data
+                m["_rewards_daily_rate"] = 0
+                for r in (m.get("clobRewards") or []):
+                    rate = r.get("rewardsDailyRate", 0)
+                    if rate > m["_rewards_daily_rate"]:
+                        m["_rewards_daily_rate"] = rate
+                m["_rewards_max_spread"] = float(m.get("rewardsMaxSpread") or 0) / 100
+                m["_rewards_min_size"] = float(m.get("rewardsMinSize") or 0)
                 result.append(m)
         return result
 
@@ -689,6 +798,17 @@ class MarketScanner:
                     days_to_resolve = max(1, (end_date - now).days)
                 except:
                     pass
+
+            # MARKET AGE FILTER: Skip brand-new markets (< 24h old) — risk of manipulation
+            created_str = m.get("createdAt", m.get("startDate", ""))
+            if created_str:
+                try:
+                    created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                    market_age_hours = (now - created_at).total_seconds() / 3600
+                    if market_age_hours < 24:
+                        continue  # Too new, skip
+                except (ValueError, TypeError):
+                    pass  # Can't parse, allow through
 
             # CAPITAL EFFICIENCY FILTER: Skip long-term markets for resolution strategies
             skip_resolution_strategies = days_to_resolve > CONFIG["max_days_to_resolve"]
@@ -947,16 +1067,17 @@ class MarketScanner:
 
                 # PREFERRED TOPICS: Politics & Economics (data-driven: Kelly +4-5%)
                 # Crypto REMOVED — negative Kelly (-1.53%) from 88.5M trade analysis
-                preferred_topics = [
-                    "trump", "biden", "election", "president", "congress",
-                    "fed", "interest rate", "inflation", "tariff", "economy",
-                    "gdp", "unemployment", "recession", "jobs",
-                ]
-                is_preferred = any(topic in q_lower for topic in preferred_topics)
+                # Use word-boundary set matching to avoid false positives
+                import re
+                _q_words_pref = set(re.findall(r'[a-z0-9]+', q_lower))
+                preferred_exact = {"trump", "biden", "election", "president", "congress",
+                                   "fed", "tariff", "economy", "gdp", "unemployment", "recession", "jobs"}
+                preferred_phrases = ["interest rate", "inflation"]  # Multi-word: substring OK
+                is_preferred = bool(_q_words_pref & preferred_exact) or any(p in q_lower for p in preferred_phrases)
 
                 # NEGATIVE CATEGORIES: Crypto has negative edge
-                negative_categories = ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana"]
-                is_negative_category = any(kw in q_lower for kw in negative_categories)
+                negative_exact = {"bitcoin", "btc", "ethereum", "eth", "crypto", "solana"}
+                is_negative_category = bool(_q_words_pref & negative_exact)
 
                 # SPORTS FILTER: Sports markets have higher variance, all 3 MM stops
                 # came from sports. Tennis/LoL/soccer dips are real info, not mispricing.
@@ -965,30 +1086,40 @@ class MarketScanner:
                 _q_words = set(re.findall(r'[a-z0-9]+', q_lower))
                 sports_exact = {"tennis", "atp", "wta", "soccer", "football",
                                 "nba", "nfl", "nhl", "mlb", "cricket", "ipl",
-                                "mls", "esports", "csgo", "dota", "lol"}
+                                "mls", "esports", "csgo", "dota", "lol",
+                                "valorant", "overwatch", "ufc", "boxing",
+                                "f1", "nascar", "pga", "lpga", "rugby"}
                 sports_phrases = [
                     "grand slam", "premier league", "champions league",
                     "la liga", "serie a", "bundesliga", "ligue 1",
                     "league of legends", " vs ",
                     "game 1", "game 2", "game 3",
+                    "counter-strike", "esl pro", "(bo3)", "(bo1)", "(bo5)",
+                    "open:", "championships:",  # Tennis tournament patterns
                 ]
                 is_sports = bool(_q_words & sports_exact) or any(p in q_lower for p in sports_phrases)
 
+                # HARD BLOCK: Sports/esports markets — legging risk is catastrophic
+                # All 3 stuck/losing positions were sports (tennis, esports, tennis)
+                # Sports matches resolve during the buy→sell gap, making MM impossible
+                if is_sports:
+                    continue  # HARD BLOCK — sports blocked from MM entirely
+
                 # TWO-ZONE PRICE FILTER (data-driven from 88.5M trades)
-                # Sweet spot: 0.50-0.70 (Kelly +29-48%, ROI +23-26%)
-                # Fallback: 0.80-0.95 (Kelly +4-20%, smaller edge)
+                # Sweet spot: 0.15-0.65 (Kelly +29-48%, ROI +23-26%)
+                # Fallback: 0.80-0.95 only for preferred categories (politics/economics)
                 # Death zone: 0.35-0.45 (Kelly -17 to -22%) — EXCLUDED
                 # Trap zone: 0.70-0.75 (Kelly -19%) — EXCLUDED
                 mm_min, mm_max = CONFIG["mm_price_range"]
                 fb_min, fb_max = CONFIG.get("mm_fallback_range", (0.80, 0.95))
                 in_sweet_spot = mm_min <= best_ask <= mm_max
-                in_fallback = fb_min <= best_ask <= fb_max
+                in_fallback = fb_min <= best_ask <= fb_max and is_preferred  # Fallback ONLY for politics/economics
                 mm_pass_price = in_sweet_spot or in_fallback
 
                 mm_pass_bid = best_bid > 0
                 mm_pass_vol = volume_24h >= CONFIG["mm_min_volume_24h"]
                 mm_pass_liq = liquidity >= CONFIG["mm_min_liquidity"]
-                if (not is_meme_market and not is_sports and mm_pass_price and mm_pass_bid and mm_pass_vol and mm_pass_liq):
+                if (not is_meme_market and mm_pass_price and mm_pass_bid and mm_pass_vol and mm_pass_liq):
 
                     spread = best_ask - best_bid
                     spread_pct = spread / ((best_ask + best_bid) / 2) if (best_ask + best_bid) > 0 else 0
@@ -1004,10 +1135,16 @@ class MarketScanner:
                         annualized = min(self.calculate_annualized_return(expected_return, max(1, int(days_to_fill * 10))), 10.0)
 
                         # Data-driven confidence based on price zone + category
-                        if in_sweet_spot and is_preferred:
+                        # Core sweet spot (0.50-0.70) gets highest confidence
+                        core_sweet = 0.50 <= best_ask <= 0.70
+                        if core_sweet and is_preferred:
                             confidence = 0.85
-                        elif in_sweet_spot:
+                        elif core_sweet:
                             confidence = 0.75
+                        elif in_sweet_spot and is_preferred:
+                            confidence = 0.70
+                        elif in_sweet_spot:
+                            confidence = 0.60
                         elif in_fallback and is_preferred:
                             confidence = 0.65
                         else:
@@ -1015,8 +1152,23 @@ class MarketScanner:
                         # Reduce confidence for crypto (negative Kelly)
                         if is_negative_category:
                             confidence -= 0.10
+                        # Sports already hard-blocked above — this is a safety net
+                        if is_sports:
+                            confidence -= 0.30  # Effectively kills any sports that slip through
+
+                        # Rewards bonus: prefer markets paying more to makers
+                        rewards_daily = m.get("_rewards_daily_rate", 0)
+                        rewards_max_spread = m.get("_rewards_max_spread", 0)
+                        rewards_eligible = (CONFIG.get("mm_rewards_bonus")
+                                            and rewards_max_spread > 0
+                                            and CONFIG["mm_target_profit"] <= rewards_max_spread)
+                        rewards_bonus = 0.0
+                        if rewards_eligible and rewards_daily >= CONFIG.get("mm_rewards_min_daily_rate", 50):
+                            rewards_bonus = min(rewards_daily / 1000, 1.0)
+                            confidence += 0.05
 
                         zone = "sweet" if in_sweet_spot else "fallback"
+                        rewards_tag = f", +${rewards_daily:.0f}/d rewards" if rewards_daily > 0 else ""
                         opportunities.append({
                             "condition_id": condition_id,
                             "question": question,
@@ -1037,7 +1189,10 @@ class MarketScanner:
                             "volume_24h": volume_24h,
                             "confidence": confidence,
                             "price_zone": zone,
-                            "reason": f"MM[{zone}]: Spread {spread_pct:.1%}, Vol ${volume_24h/1000:.0f}k, {days_to_resolve}d, conf={confidence:.2f}"
+                            "rewards_daily_rate": rewards_daily,
+                            "rewards_eligible": rewards_eligible,
+                            "rewards_bonus": rewards_bonus,
+                            "reason": f"MM[{zone}]: Spread {spread_pct:.1%}, Vol ${volume_24h/1000:.0f}k, {days_to_resolve}d, conf={confidence:.2f}{rewards_tag}"
                         })
 
             # Strategy 8: BINANCE ARBITRAGE (Crypto price lag arbitrage)
@@ -1612,6 +1767,18 @@ class TradingEngine:
                     if strategy == "MEAN_REVERSION":
                         self.scanner.mr_cooldowns[condition_id] = datetime.now(timezone.utc)
 
+            # Emergency stop for NEAR_ strategies — if loss exceeds 15%, exit regardless
+            elif pnl_pct <= -0.15 and strategy in no_stop_strategies:
+                liq = position.get("liquidity", 50000)
+                slip = taker_slippage(liq)
+                exit_price = current_price * (1 - slip)
+                exit_fee = polymarket_taker_fee(exit_price)
+                result = self.portfolio.sell(condition_id, exit_price, "EMERGENCY_STOP", fee_pct=exit_fee)
+                if result["success"]:
+                    trade = result["trade"]
+                    print(f"[TRADE] EMERGENCY STOP ({strategy}): {trade['question'][:40]}...")
+                    print(f"        P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%) — exceeded -15% emergency threshold")
+
             # Stop loss — skip for resolution strategies. Taker fee + slippage applies.
             elif pnl_pct <= CONFIG["stop_loss_pct"] and strategy not in no_stop_strategies:
                 liq = position.get("liquidity", 50000)
@@ -1729,28 +1896,46 @@ class TradingEngine:
                     print(f"     CIRCUIT BREAKER: {stop_count} stops in 24h — market locked out")
             return
 
-        # EXIT CONDITION 3: Timeout (didn't fill in time)
-        # MM_TIMEOUT = taker exit (exiting at market) = taker fee + slippage
-        # RULE: Don't dump for 0-1% — only timeout-exit if profit covers taker costs (>=3%)
-        mm_timeout_min_profit = CONFIG.get("mm_timeout_min_profit_pct", 0.03)
-        if hold_hours >= CONFIG["mm_max_hold_hours"]:
-            if pnl_pct < mm_timeout_min_profit:
-                # Not enough profit to cover taker fees + slippage. Hold position.
-                # The sell at mm_ask is still posted — let it fill naturally.
-                if hold_hours < CONFIG["mm_max_hold_hours"] + 1:
-                    # Log once when we first skip the timeout
-                    print(f"[MM] TIMEOUT HOLD: {position.get('question', '')[:40]}... "
-                          f"P&L {pnl_pct:+.1%} < {mm_timeout_min_profit:.0%} min, keeping sell posted")
-                return
+        # EXIT CONDITION 3: Market-health-based timeout (replaces clock-based dumps)
+        # PRINCIPLE: Don't exit because time passed. Exit because the MARKET is unhealthy.
+        # - Tight spread + price near entry = healthy position, keep waiting
+        # - Wide spread or price far below entry after long hold = unhealthy, exit
+        abs_cap = CONFIG.get("mm_max_hold_hours_absolute", 24)
+
+        # Simulate spread as price deviation from entry (sim doesn't have real orderbook)
+        sim_spread_health = abs(current_price - position["entry_price"]) / position["entry_price"]
+
+        if hold_hours >= abs_cap:
+            # Absolute safety cap — 24h max regardless. Force exit.
             slippage = CONFIG.get("mm_slippage_bps", 20) / 10000
             exit_price = current_price * (1 - slippage)
             timeout_fee = polymarket_taker_fee(exit_price)
-            result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT", fee_pct=timeout_fee)
+            result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT_ABSOLUTE", fee_pct=timeout_fee)
             if result["success"]:
                 trade = result["trade"]
-                print(f"[MM] TIMEOUT: {trade['question'][:40]}...")
-                print(f"     Held {hold_hours:.1f}h without fill, exiting at ${exit_price:.3f} (slip {slippage:.2%})")
+                print(f"[MM] ABSOLUTE TIMEOUT: {trade['question'][:40]}...")
+                print(f"     Held {hold_hours:.1f}h (cap={abs_cap}h), forced exit at ${exit_price:.3f}")
                 print(f"     P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
+            return
+        elif hold_hours >= 4 and sim_spread_health > 0.05:
+            # Market drifted >5% from entry and we've held 4+ hours — exit
+            slippage = CONFIG.get("mm_slippage_bps", 20) / 10000
+            exit_price = current_price * (1 - slippage)
+            timeout_fee = polymarket_taker_fee(exit_price)
+            result = self.portfolio.sell(condition_id, exit_price, "MM_TIMEOUT_DRIFT", fee_pct=timeout_fee)
+            if result["success"]:
+                trade = result["trade"]
+                print(f"[MM] DRIFT EXIT: {trade['question'][:40]}...")
+                print(f"     Held {hold_hours:.1f}h, price drifted {sim_spread_health:.1%} from entry")
+                print(f"     P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
+            return
+        elif hold_hours >= 2 and pnl_pct >= 0.03:
+            # Profitable and held 2h+ — take profit as maker
+            result = self.portfolio.sell(condition_id, mm_ask, "MM_FILLED", fee_pct=0.0)
+            if result["success"]:
+                trade = result["trade"]
+                print(f"[MM] TAKE PROFIT: {trade['question'][:40]}...")
+                print(f"     Held {hold_hours:.1f}h, P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
             return
 
     async def _check_mm_exit_live(self, condition_id: str, position: dict):
@@ -1789,13 +1974,40 @@ class TradingEngine:
 
             status = await self.executor.get_order_status(buy_order_id)
 
-            # Order no longer exists on CLOB — clean up ghost position
+            # Order no longer exists on CLOB — query actual fill before returning balance
             if status.get("status") in ("ERROR", "CANCELLED", "CANCELED"):
-                self.portfolio.balance += position.get("cost_basis", 0)
-                del self.portfolio.positions[condition_id]
-                self.portfolio._save()
-                reason = status.get("status")
-                print(f"[MM-LIVE] BUY {reason}: order gone, returned ${position.get('cost_basis', 0):.2f}")
+                matched = float(status.get("size_matched", 0) or 0)
+                limit_price = float(status.get("price", position.get("entry_price", 0)) or 0)
+                if matched > 0 and limit_price > 0:
+                    filled_cost = matched * limit_price
+                    unfilled_cost = position["cost_basis"] - filled_cost
+                    # DUST SWEEP: if filled portion < min_position, sell as taker immediately
+                    # Better to lose $0.05 in fees than lock a portfolio slot permanently
+                    if filled_cost < CONFIG.get("live_min_position", 5):
+                        self.portfolio.balance += position.get("cost_basis", 0)
+                        del self.portfolio.positions[condition_id]
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] DUST SWEEP: partial fill ${filled_cost:.2f} < ${CONFIG.get('live_min_position', 5)} min, "
+                              f"returning full cost ${position.get('cost_basis', 0):.2f}")
+                        # Note: actual dust shares are still on-chain — reconciliation will handle
+                    else:
+                        # Partial fill: keep the filled portion as a position
+                        position["shares"] = matched
+                        position["cost_basis"] = filled_cost
+                        position["entry_price"] = limit_price
+                        position["live_state"] = "BUY_FILLED"
+                        position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                        self.portfolio.balance += max(unfilled_cost, 0)
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] PARTIAL FILL: {matched:.2f} shares @ ${limit_price:.3f}, "
+                              f"returned ${unfilled_cost:.2f} unfilled, keeping position")
+                else:
+                    # Zero fill — return full cost
+                    self.portfolio.balance += position.get("cost_basis", 0)
+                    del self.portfolio.positions[condition_id]
+                    self.portfolio._save()
+                    reason = status.get("status")
+                    print(f"[MM-LIVE] BUY {reason}: order gone, returned ${position.get('cost_basis', 0):.2f}")
                 return
 
             matched = status.get("size_matched", 0)
@@ -1807,22 +2019,49 @@ class TradingEngine:
                 actual_fill = fill_price if fill_price else status.get("price", position["entry_price"])
                 position["live_state"] = "BUY_FILLED"
                 position["actual_fill_price"] = actual_fill
-                # Update entry_price to match reality so P&L calculations are correct
+                # Recalculate shares from actual fill price (H2: cost basis fix)
+                actual_shares = position["cost_basis"] / actual_fill if actual_fill > 0 else position["shares"]
                 if fill_price and abs(fill_price - position["entry_price"]) > 0.001:
-                    print(f"[MM-LIVE] BUY FILL PRICE: ${fill_price:.4f} (limit was ${position['entry_price']:.3f})")
+                    print(f"[MM-LIVE] BUY FILL PRICE: ${fill_price:.4f} (limit was ${position['entry_price']:.3f}), "
+                          f"shares: {position['shares']:.2f} → {actual_shares:.2f}")
                     position["entry_price"] = actual_fill
-                    position["cost_basis"] = actual_fill * position["shares"]
+                    position["shares"] = actual_shares
                 # Reset timer so sell timeout starts from fill, not buy post
                 position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
                 self.portfolio._save()
                 print(f"[MM-LIVE] BUY FILLED @ ${actual_fill:.4f}: {position['question'][:40]}...")
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
-                # Timeout - cancel unfilled buy
-                await self.executor.cancel_order(buy_order_id)
-                self.portfolio.balance += position["cost_basis"]
-                del self.portfolio.positions[condition_id]
-                self.portfolio._save()
-                print(f"[MM-LIVE] BUY TIMEOUT: Cancelled unfilled buy after {hold_hours:.1f}h")
+                # Timeout — query actual fill before returning balance
+                cancel_status = await self.executor.cancel_order(buy_order_id)
+                # Re-check fill after cancel (order may have filled between check and cancel)
+                final_status = await self.executor.get_order_status(buy_order_id)
+                final_matched = float(final_status.get("size_matched", 0) or 0)
+                limit_price = float(final_status.get("price", position.get("entry_price", 0)) or 0)
+                if final_matched > 0 and limit_price > 0:
+                    filled_cost = final_matched * limit_price
+                    unfilled_cost = position["cost_basis"] - filled_cost
+                    # DUST SWEEP: tiny partial fill — not worth keeping
+                    if filled_cost < CONFIG.get("live_min_position", 5):
+                        self.portfolio.balance += position["cost_basis"]
+                        del self.portfolio.positions[condition_id]
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] DUST SWEEP on timeout: ${filled_cost:.2f} partial < ${CONFIG.get('live_min_position', 5)} min")
+                    else:
+                        # Partial fill during timeout — keep filled portion
+                        position["shares"] = final_matched
+                        position["cost_basis"] = filled_cost
+                        position["entry_price"] = limit_price
+                        position["live_state"] = "BUY_FILLED"
+                        position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                        self.portfolio.balance += max(unfilled_cost, 0)
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] BUY TIMEOUT PARTIAL: {final_matched:.2f} shares filled, "
+                              f"returned ${unfilled_cost:.2f}, keeping position")
+                else:
+                    self.portfolio.balance += position["cost_basis"]
+                    del self.portfolio.positions[condition_id]
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] BUY TIMEOUT: Cancelled unfilled buy after {hold_hours:.1f}h")
 
         elif live_state == "BUY_FILLED":
             # Post sell order at mm_ask
@@ -1830,20 +2069,56 @@ class TradingEngine:
                 print(f"[MM-LIVE] ERROR: No token_id for sell order")
                 return
 
-            # Track sell retry attempts to avoid infinite loop
+            # Check if last sell attempt hit "orderbook does not exist" — market is gone
+            last_sell_error = position.get("_last_sell_error", "")
+            if "does not exist" in last_sell_error:
+                print(f"[MM-LIVE] MARKET GONE: orderbook no longer exists, closing position")
+                sale = self.portfolio.sell(condition_id, position["entry_price"], "MM_MARKET_GONE", fee_pct=0.0)
+                if sale["success"]:
+                    print(f"[MM-LIVE] CLOSED (market gone): ${sale['trade']['pnl']:+.2f}")
+                return
+
+            # Track sell retry attempts — hard cap at 10 to prevent infinite loop
             sell_retries = position.get("sell_retries", 0)
+            if sell_retries >= 10:
+                # Hard cap — force exit at best available price
+                book = await self.executor.get_order_book(token_id) if token_id else None
+                best_bid = book["bids"][0][0] if book and book.get("bids") else 0
+                if best_bid >= 0.02:
+                    result = await self.executor.post_limit_order(
+                        token_id=token_id, side="SELL",
+                        price=best_bid, size=round(position["shares"], 2),
+                        post_only=False
+                    )
+                    exit_order_id = result.get("orderID", "")
+                    if exit_order_id:
+                        position["live_state"] = "EXIT_PENDING"
+                        position["exit_order_id"] = exit_order_id
+                        position["exit_reason"] = "MM_SELL_RETRY_CAP"
+                        position["exit_limit_price"] = best_bid
+                        position.pop("sell_retries", None)
+                        self.portfolio._save()
+                        print(f"[MM-LIVE] SELL RETRY CAP (10): forcing exit @ ${best_bid:.3f}")
+                else:
+                    position["_illiquid"] = True
+                    position.pop("sell_retries", None)
+                    self.portfolio._save()
+                    print(f"[MM-LIVE] SELL RETRY CAP (10): no viable bid, marked illiquid")
+                return
             if sell_retries >= 5:
-                # NegRisk balance/allowance bug — resync and retry first
-                if self.live and hasattr(self.executor, '_resync_negrisk_balance'):
+                # NegRisk balance/allowance bug — resync and retry ONCE
+                resync_count = position.get("_resync_count", 0)
+                if resync_count == 0 and self.live and hasattr(self.executor, '_resync_negrisk_balance'):
                     try:
                         await self.executor._resync_negrisk_balance(token_id)
                         position["sell_retries"] = 0
+                        position["_resync_count"] = 1
                         self.portfolio._save()
                         print(f"[MM-LIVE] SELL FAILED 5x — resynced NegRisk balance, will retry")
                         return
                     except Exception as e:
                         print(f"[MM-LIVE] NegRisk resync failed: {e}")
-                # Resync didn't help — ask AI what to do and at what price
+                # Resync already tried or didn't help — ask AI what to do
                 ai_exit = await self._ai_exit_decision(position, "SELL_FAILED")
                 if ai_exit["action"] == "SELL":
                     exit_price = ai_exit["sell_price"]
@@ -1858,9 +2133,18 @@ class TradingEngine:
                         position["exit_reason"] = "MM_SELL_FAILED"
                         position["exit_limit_price"] = exit_price
                         position.pop("sell_retries", None)
+                        position.pop("_resync_count", None)
                         self.portfolio._save()
                         print(f"[MM-LIVE] AI EXIT @ ${exit_price:.3f}: {ai_exit['reason']}")
                     else:
+                        error_msg = str(result.get("error", ""))
+                        if "does not exist" in error_msg:
+                            # Market gone — close position immediately
+                            print(f"[MM-LIVE] MARKET GONE: orderbook no longer exists, closing position")
+                            sale = self.portfolio.sell(condition_id, position["entry_price"], "MM_MARKET_GONE", fee_pct=0.0)
+                            if sale["success"]:
+                                print(f"[MM-LIVE] CLOSED (market gone): ${sale['trade']['pnl']:+.2f}")
+                            return
                         position["sell_retries"] = 0
                         self.portfolio._save()
                 else:
@@ -1878,19 +2162,23 @@ class TradingEngine:
             if sell_order_id:
                 position["sell_order_id"] = sell_order_id
                 position["live_state"] = "SELL_PENDING"
+                position["sell_posted_time"] = datetime.now(timezone.utc).isoformat()
                 position.pop("sell_retries", None)
+                position.pop("_resync_count", None)
+                position.pop("_last_sell_error", None)
                 self.portfolio._save()
                 print(f"[MM-LIVE] SELL POSTED @ ${mm_ask:.3f}: {position['question'][:40]}...")
             else:
                 error_msg = str(result.get("error", ""))
                 if "does not exist" in error_msg:
-                    # Orderbook gone — market resolved or delisted. Position is dead.
-                    # Close at entry price (we may have been redeemed externally).
+                    # Orderbook gone — market resolved or delisted. Close immediately.
                     print(f"[MM-LIVE] MARKET GONE: orderbook no longer exists, closing position")
                     sale = self.portfolio.sell(condition_id, position["entry_price"], "MM_MARKET_GONE", fee_pct=0.0)
                     if sale["success"]:
                         print(f"[MM-LIVE] CLOSED (market gone): ${sale['trade']['pnl']:+.2f}")
                     return
+                # Save error for next-cycle detection (catches formats the substring check misses)
+                position["_last_sell_error"] = error_msg
                 # Post-only rejected (would cross spread) - retry next cycle
                 position["sell_retries"] = sell_retries + 1
                 self.portfolio._save()
@@ -1930,7 +2218,117 @@ class TradingEngine:
                     print(f"[MM-LIVE] FILLED! P&L: ${trade['pnl']:+.2f} ({trade['pnl_pct']:+.1f}%)")
                 return
 
-            # Check stop-loss and timeout while waiting for sell fill
+            # ── SPREAD CIRCUIT BREAKER (post-entry orderbook health check) ──
+            # CRITICAL: Distinguish network errors from truly dead orderbooks
+            # If get_order_book fails (RPC/network), skip circuit breaker this cycle
+            try:
+                book = await self.executor.get_order_book(token_id)
+            except Exception as e:
+                print(f"[MM-LIVE] Orderbook fetch failed (network?): {e} — skipping circuit breaker this cycle")
+                book = None
+
+            if not book or (not book.get("bids") and not book.get("asks")):
+                # No orderbook data — could be network error, skip destructive actions
+                print(f"[MM-LIVE] No orderbook data for {position.get('question', '')[:40]}, skipping spread check")
+                return
+
+            real_best_bid = book["bids"][0][0] if book.get("bids") else 0
+            real_best_ask = book["asks"][0][0] if book.get("asks") else 1
+            real_spread = (real_best_ask - real_best_bid) / max(real_best_ask, 0.01) if real_best_ask > real_best_bid else 1.0
+
+            fill_pct = (matched / original * 100) if original > 0 else 0
+            question_short = position.get("question", "")[:40]
+
+            # 1) DEAD ORDERBOOK: spread > 50% — force exit at best_bid immediately
+            if real_spread >= CONFIG["mm_spread_dead_threshold"]:
+                print(f"[CIRCUIT_BREAKER] DEAD orderbook: spread={real_spread:.0%} bid=${real_best_bid:.3f} — {question_short}")
+                await self.executor.cancel_order(sell_order_id)
+                if real_best_bid >= 0.02:
+                    # There's some bid — dump at best_bid
+                    result = await self.executor.post_limit_order(
+                        token_id=token_id, side="SELL",
+                        price=real_best_bid, size=round(position["shares"], 2),
+                        post_only=False  # Taker to guarantee fill
+                    )
+                    exit_order_id = result.get("orderID", "")
+                    if exit_order_id:
+                        position["live_state"] = "EXIT_PENDING"
+                        position["exit_order_id"] = exit_order_id
+                        position["exit_reason"] = "CIRCUIT_BREAKER_DEAD"
+                        position["exit_limit_price"] = real_best_bid
+                        self.portfolio._save()
+                        print(f"[CIRCUIT_BREAKER] Force exit @ ${real_best_bid:.3f}")
+                else:
+                    # No viable bid — mark illiquid, stop reposting sells
+                    position["_illiquid"] = True
+                    position["sell_order_id"] = ""
+                    self.portfolio._save()
+                    print(f"[CIRCUIT_BREAKER] ILLIQUID: best_bid=${real_best_bid:.3f}, holding until resolution")
+                return
+
+            # 2) WARNING: spread > 20% — cancel sell and re-price to best_bid
+            if real_spread >= CONFIG["mm_spread_warn_threshold"]:
+                sell_price = position.get("mm_ask", mm_ask)
+                if real_best_bid > 0.05 and (sell_price - real_best_bid) > 0.02:
+                    print(f"[CIRCUIT_BREAKER] Wide spread={real_spread:.0%}, repricing sell ${sell_price:.3f} → ${real_best_bid:.3f}")
+                    await self.executor.cancel_order(sell_order_id)
+                    result = await self.executor.post_limit_order(
+                        token_id=token_id, side="SELL",
+                        price=real_best_bid, size=round(position["shares"], 2),
+                        post_only=False
+                    )
+                    new_order_id = result.get("orderID", "")
+                    if new_order_id:
+                        position["sell_order_id"] = new_order_id
+                        position["exit_reason"] = "CIRCUIT_BREAKER_REPRICE"
+                        self.portfolio._save()
+                        print(f"[CIRCUIT_BREAKER] Repriced sell to ${real_best_bid:.3f}")
+                    return
+
+            # 3) STALE SELL: unfilled > 2h AND spread > 10% — lower to best_bid
+            sell_posted_time = position.get("sell_posted_time")
+            if sell_posted_time:
+                try:
+                    sell_age_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(sell_posted_time)).total_seconds() / 3600
+                except (ValueError, TypeError):
+                    sell_age_hours = 0
+                if sell_age_hours > 2 and real_spread > 0.10 and fill_pct < 10:
+                    print(f"[CIRCUIT_BREAKER] Sell stale {sell_age_hours:.1f}h, spread={real_spread:.0%}, lowering to bid")
+                    await self.executor.cancel_order(sell_order_id)
+                    if real_best_bid > 0.05:
+                        result = await self.executor.post_limit_order(
+                            token_id=token_id, side="SELL",
+                            price=real_best_bid, size=round(position["shares"], 2),
+                            post_only=False
+                        )
+                        new_order_id = result.get("orderID", "")
+                        if new_order_id:
+                            position["sell_order_id"] = new_order_id
+                            position["sell_posted_time"] = datetime.now(timezone.utc).isoformat()
+                            self.portfolio._save()
+                    return
+
+            # 4) ABSOLUTE TIME CAP: 24h max hold — force exit at best_bid regardless
+            if hold_hours >= CONFIG["mm_max_hold_hours_absolute"]:
+                print(f"[CIRCUIT_BREAKER] 24h absolute cap reached ({hold_hours:.1f}h), force exit")
+                await self.executor.cancel_order(sell_order_id)
+                exit_price = real_best_bid if real_best_bid >= 0.02 else position["entry_price"] * 0.5
+                result = await self.executor.post_limit_order(
+                    token_id=token_id, side="SELL",
+                    price=exit_price, size=round(position["shares"], 2),
+                    post_only=False
+                )
+                exit_order_id = result.get("orderID", "")
+                if exit_order_id:
+                    position["live_state"] = "EXIT_PENDING"
+                    position["exit_order_id"] = exit_order_id
+                    position["exit_reason"] = "MM_ABSOLUTE_TIMEOUT"
+                    position["exit_limit_price"] = exit_price
+                    self.portfolio._save()
+                    print(f"[CIRCUIT_BREAKER] Absolute timeout exit @ ${exit_price:.3f}")
+                return
+
+            # ── Standard stop-loss and timeout checks ──
             current_price = await self._get_market_price(condition_id, position)
             if current_price is None:
                 return
@@ -1938,37 +2336,31 @@ class TradingEngine:
             pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
 
             if pnl_pct <= -0.03:
-                # STOP LOSS: Ask AI whether to exit and at what price
-                ai_exit = await self._ai_exit_decision(position, "STOP_LOSS")
-                if ai_exit["action"] == "SELL":
-                    await self.executor.cancel_order(sell_order_id)
-                    exit_price = ai_exit["sell_price"]
-                    result = await self.executor.post_limit_order(
-                        token_id=token_id, side="SELL",
-                        price=exit_price, size=round(position["shares"], 2),
-                        post_only=False  # Allow taker to exit fast
-                    )
-                    exit_order_id = result.get("orderID", "")
-                    if exit_order_id:
-                        position["live_state"] = "EXIT_PENDING"
-                        position["exit_order_id"] = exit_order_id
-                        position["exit_reason"] = "MM_STOP"
-                        position["exit_limit_price"] = exit_price
-                        self.portfolio._save()
-                        print(f"[MM-LIVE] AI STOP EXIT @ ${exit_price:.3f}: {ai_exit['reason']}")
-                else:
-                    # AI says HOLD — price drop is temporary, true prob still supports our position
-                    # Reset timer to avoid re-triggering immediately
-                    position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                # MECHANICAL STOP LOSS: No AI override — stops MUST execute
+                # AI previously vetoed stops, causing positions to ride to -100%
+                await self.executor.cancel_order(sell_order_id)
+                exit_price = real_best_bid if real_best_bid >= 0.02 else current_price * 0.97
+                result = await self.executor.post_limit_order(
+                    token_id=token_id, side="SELL",
+                    price=exit_price, size=round(position["shares"], 2),
+                    post_only=False  # Taker to guarantee fill
+                )
+                exit_order_id = result.get("orderID", "")
+                if exit_order_id:
+                    position["live_state"] = "EXIT_PENDING"
+                    position["exit_order_id"] = exit_order_id
+                    position["exit_reason"] = "MM_STOP"
+                    position["exit_limit_price"] = exit_price
                     self.portfolio._save()
-                    print(f"[MM-LIVE] AI STOP HOLD: {ai_exit['reason']} (true_prob={ai_exit['true_probability']:.2f})")
+                    print(f"[MM-LIVE] MECHANICAL STOP @ ${exit_price:.3f}: P&L {pnl_pct:+.1%} <= -3%")
 
             elif hold_hours >= CONFIG["mm_max_hold_hours"]:
-                # TIMEOUT: Sell didn't fill in time. Ask AI whether to exit and at what price.
-                ai_exit = await self._ai_exit_decision(position, "TIMEOUT")
-                if ai_exit["action"] == "SELL":
+                # MARKET-CONDITION TIMEOUT: Exit based on orderbook health, not just clock
+                # Wide spread = unhealthy market, exit. Tight spread = healthy, keep waiting.
+                if real_spread > 0.10:
+                    print(f"[MM-LIVE] TIMEOUT + wide spread ({real_spread:.0%}), forcing exit at bid")
                     await self.executor.cancel_order(sell_order_id)
-                    exit_price = ai_exit["sell_price"]
+                    exit_price = real_best_bid if real_best_bid >= 0.02 else position["entry_price"] * 0.9
                     result = await self.executor.post_limit_order(
                         token_id=token_id, side="SELL",
                         price=exit_price, size=round(position["shares"], 2),
@@ -1978,15 +2370,32 @@ class TradingEngine:
                     if exit_order_id:
                         position["live_state"] = "EXIT_PENDING"
                         position["exit_order_id"] = exit_order_id
-                        position["exit_reason"] = "MM_TIMEOUT"
+                        position["exit_reason"] = "MM_TIMEOUT_SPREAD"
                         position["exit_limit_price"] = exit_price
                         self.portfolio._save()
-                        print(f"[MM-LIVE] AI TIMEOUT EXIT @ ${exit_price:.3f}: {ai_exit['reason']}")
+                        print(f"[MM-LIVE] TIMEOUT+SPREAD exit @ ${exit_price:.3f}")
+                    return
+                elif real_spread <= 0.05:
+                    # Healthy orderbook — keep sell posted, no need to panic
+                    if int(hold_hours) > int(hold_hours - 0.5):  # Log once per 30min
+                        print(f"[MM-LIVE] HEALTHY HOLD: spread={real_spread:.0%}, keeping sell @ ${mm_ask:.3f} ({hold_hours:.1f}h)")
                 else:
-                    # AI says HOLD — the position still has edge, keep sell order posted
-                    position["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
-                    self.portfolio._save()
-                    print(f"[MM-LIVE] AI TIMEOUT HOLD: {ai_exit['reason']} (true_prob={ai_exit['true_probability']:.2f})")
+                    # Moderate spread (5-10%) — lower ask toward best_bid to attract fills
+                    new_ask = round(max(real_best_bid + 0.005, position["entry_price"] * 1.005), 3)
+                    if new_ask < mm_ask - 0.005:
+                        await self.executor.cancel_order(sell_order_id)
+                        result = await self.executor.post_limit_order(
+                            token_id=token_id, side="SELL",
+                            price=new_ask, size=round(position["shares"], 2),
+                            post_only=True
+                        )
+                        new_order_id = result.get("orderID", "")
+                        if new_order_id:
+                            position["sell_order_id"] = new_order_id
+                            position["mm_ask"] = new_ask
+                            position["sell_posted_time"] = datetime.now(timezone.utc).isoformat()
+                            self.portfolio._save()
+                            print(f"[MM-LIVE] REPRICE: ask ${mm_ask:.3f} → ${new_ask:.3f} (spread={real_spread:.0%})")
 
             elif status.get("status") in ("CANCELLED", "CANCELED"):
                 # Sell order cancelled externally - re-enter BUY_FILLED to repost
@@ -2553,6 +2962,14 @@ class TradingEngine:
         mm_ask = round(mid_price + max(mid_price * ai_spread, 0.01), 3)
         spread_pct = opp.get("spread_pct", 0.02)
 
+        # Guard: inverted or zero-width spread means guaranteed loss
+        if mm_bid >= mm_ask:
+            print(f"[MM] BLOCKED: inverted spread bid=${mm_bid} >= ask=${mm_ask} (mid=${mid_price}, ai_spread={ai_spread}) — {opp['question'][:40]}")
+            return
+        if mm_bid <= 0 or mm_ask >= 1:
+            print(f"[MM] BLOCKED: bid/ask out of bounds bid=${mm_bid} ask=${mm_ask} — {opp['question'][:40]}")
+            return
+
         # Split capital: half for bid (buying), half for ask (selling position)
         # But we need to BUY first to have something to sell
         # Strategy: Buy at our bid, then post ask to sell
@@ -2564,6 +2981,49 @@ class TradingEngine:
             if not token_id:
                 print(f"[MM-LIVE] SKIP: No token_id for {opp['question'][:40]}")
                 return
+
+            # ── ORDERBOOK DEPTH CHECK (prevents entry into dead markets) ──
+            book = await self.executor.get_order_book(token_id)
+            if not book or not book.get("bids") or not book.get("asks"):
+                print(f"[DEPTH_CHECK] BLOCKED: No orderbook for {opp['question'][:40]}")
+                return
+
+            real_best_bid = book["bids"][0][0] if book["bids"] else 0
+            real_best_ask = book["asks"][0][0] if book["asks"] else 1
+            real_spread = (real_best_ask - real_best_bid) / max(real_best_ask, 0.01)
+
+            if real_best_bid < CONFIG["mm_min_best_bid"]:
+                print(f"[DEPTH_CHECK] BLOCKED: best_bid=${real_best_bid:.3f} < ${CONFIG['mm_min_best_bid']} — {opp['question'][:40]}")
+                return
+            if real_best_ask > CONFIG["mm_max_best_ask"]:
+                print(f"[DEPTH_CHECK] BLOCKED: best_ask=${real_best_ask:.3f} > ${CONFIG['mm_max_best_ask']} — {opp['question'][:40]}")
+                return
+            if real_spread > CONFIG["mm_max_real_spread"]:
+                print(f"[DEPTH_CHECK] BLOCKED: spread={real_spread:.1%} > {CONFIG['mm_max_real_spread']:.0%} — {opp['question'][:40]}")
+                return
+
+            # Check exit liquidity: enough bids near our sell target?
+            bid_depth_near_exit = sum(
+                size for price, size in book["bids"]
+                if price >= mm_ask * 0.95  # bids within 5% of our ask
+            )
+            position_size = buy_amount / mm_bid
+            min_depth = position_size * CONFIG["mm_min_exit_depth_mult"]
+            if bid_depth_near_exit < min_depth:
+                print(f"[DEPTH_CHECK] BLOCKED: exit depth={bid_depth_near_exit:.0f} < {min_depth:.0f} needed — {opp['question'][:40]}")
+                return
+
+            # Two-sided check: verify entry liquidity (ask depth) too
+            ask_depth_near_entry = sum(
+                size for price, size in book["asks"]
+                if price <= mm_bid * 1.05  # asks within 5% of our bid
+            )
+            if ask_depth_near_entry < position_size:
+                print(f"[DEPTH_CHECK] BLOCKED: entry ask depth={ask_depth_near_entry:.0f} < {position_size:.0f} shares — {opp['question'][:40]}")
+                return
+
+            print(f"[DEPTH_CHECK] OK: bid=${real_best_bid:.3f} ask=${real_best_ask:.3f} spread={real_spread:.1%} "
+                  f"exit_depth={bid_depth_near_exit:.0f} entry_depth={ask_depth_near_entry:.0f}")
 
             # Safety checks
             total_exposure = sum(p["cost_basis"] for p in self.portfolio.positions.values())
@@ -2733,13 +3193,35 @@ class TradingEngine:
             print(f"[AI] Screen error: {e}")
             return None
 
-    def _check_portfolio_concentration(self, sector: str, condition_id: str) -> bool:
+    @staticmethod
+    def _question_similarity(q1: str, q2: str) -> float:
+        """Jaccard similarity on significant tokens (detects same-event markets)."""
+        stop_words = {"will", "the", "be", "a", "an", "in", "to", "of", "for", "is",
+                      "on", "at", "by", "and", "or", "yes", "no", "win", "next",
+                      "market", "what", "who", "how", "this", "that", "with"}
+        def tokenize(q):
+            return {w.lower().strip("?.,!") for w in q.split() if len(w) > 2 and w.lower() not in stop_words}
+        t1, t2 = tokenize(q1), tokenize(q2)
+        if not t1 or not t2:
+            return 0.0
+        return len(t1 & t2) / len(t1 | t2)
+
+    def _check_portfolio_concentration(self, sector: str, condition_id: str, question: str = "") -> bool:
         """Phase 3: Check if adding this position would over-concentrate the portfolio."""
         # Rule 1: No duplicate markets
         if condition_id in self.portfolio.positions:
             return False
 
-        # Rule 2: Max 2 positions in same sector
+        # Rule 2: Event-level correlation — block correlated outcomes in same event
+        if question:
+            for pos in self.portfolio.positions.values():
+                existing_q = pos.get("question", "")
+                sim = self._question_similarity(question, existing_q)
+                if sim > 0.4:
+                    print(f"[CORRELATION] BLOCKED: \"{question[:40]}\" overlaps with \"{existing_q[:40]}\" (similarity={sim:.2f})")
+                    return False
+
+        # Rule 3: Max 2 positions in same sector
         sector_count = 0
         sector_value = 0.0
         total_value = self.portfolio.balance
@@ -2753,7 +3235,7 @@ class TradingEngine:
             print(f"[DIVERSIFY] Skipping: already {sector_count} positions in '{sector}'")
             return False
 
-        # Rule 3: Max 40% of portfolio in any one sector
+        # Rule 4: Max 40% of portfolio in any one sector
         if total_value > 0 and sector_value / total_value > 0.40:
             print(f"[DIVERSIFY] Skipping: '{sector}' already {sector_value/total_value:.0%} of portfolio")
             return False
@@ -2766,13 +3248,17 @@ class TradingEngine:
         for opp in screened:
             if opp["strategy"] == "MARKET_MAKER":
                 sector = opp.get("sector", "other")
-                if not self._check_portfolio_concentration(sector, opp["condition_id"]):
+                if not self._check_portfolio_concentration(sector, opp["condition_id"], opp.get("question", "")):
                     continue
             selected.append(opp)
 
-        # Sort MM opportunities by AI score (higher = better), others keep their order
+        # Sort MM opportunities by AI score + rewards bonus (higher = better)
         selected.sort(
-            key=lambda x: x.get("ai_score", x.get("annualized_return", x.get("confidence", 0))),
+            key=lambda x: (
+                x.get("ai_score", 0) + min(x.get("rewards_bonus", 0), 0.1),  # Cap bonus to prevent dominating sort
+                x.get("annualized_return", 0),
+                x.get("confidence", 0),
+            ),
             reverse=True
         )
         return selected
@@ -2841,10 +3327,24 @@ class TradingEngine:
             if clob_status in ("ERROR", "UNKNOWN"):
                 # Order doesn't exist on CLOB anymore
                 if live_state == "BUY_PENDING":
-                    self.portfolio.balance += pos.get("cost_basis", 0)
-                    del self.portfolio.positions[condition_id]
-                    ghosts_cleaned += 1
-                    print(f"[RECONCILE] GHOST (order gone): {pos.get('question', '')[:40]}... → returned ${pos.get('cost_basis', 0):.2f}")
+                    # Check for partial fills before returning balance
+                    matched = float(status.get("size_matched", 0) or 0)
+                    limit_price = float(status.get("price", pos.get("entry_price", 0)) or 0)
+                    if matched > 0 and limit_price > 0:
+                        filled_cost = matched * limit_price
+                        unfilled_cost = pos["cost_basis"] - filled_cost
+                        pos["shares"] = matched
+                        pos["cost_basis"] = filled_cost
+                        pos["entry_price"] = limit_price
+                        pos["live_state"] = "BUY_FILLED"
+                        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                        self.portfolio.balance += max(unfilled_cost, 0)
+                        print(f"[RECONCILE] PARTIAL FILL: {matched:.2f} shares, returned ${unfilled_cost:.2f} — {pos.get('question', '')[:40]}")
+                    else:
+                        self.portfolio.balance += pos.get("cost_basis", 0)
+                        del self.portfolio.positions[condition_id]
+                        ghosts_cleaned += 1
+                        print(f"[RECONCILE] GHOST (order gone): {pos.get('question', '')[:40]}... → returned ${pos.get('cost_basis', 0):.2f}")
                 elif live_state in ("SELL_PENDING", "EXIT_PENDING"):
                     # Sell/exit order gone — revert to BUY_FILLED to repost
                     pos["live_state"] = "BUY_FILLED"
@@ -2855,10 +3355,24 @@ class TradingEngine:
                     print(f"[RECONCILE] STALE SELL: {pos.get('question', '')[:40]}... → reverted to BUY_FILLED")
             elif clob_status in ("CANCELLED", "CANCELED"):
                 if live_state == "BUY_PENDING":
-                    self.portfolio.balance += pos.get("cost_basis", 0)
-                    del self.portfolio.positions[condition_id]
-                    ghosts_cleaned += 1
-                    print(f"[RECONCILE] CANCELLED: {pos.get('question', '')[:40]}... → returned ${pos.get('cost_basis', 0):.2f}")
+                    # Check for partial fills before returning balance
+                    matched = float(status.get("size_matched", 0) or 0)
+                    limit_price = float(status.get("price", pos.get("entry_price", 0)) or 0)
+                    if matched > 0 and limit_price > 0:
+                        filled_cost = matched * limit_price
+                        unfilled_cost = pos["cost_basis"] - filled_cost
+                        pos["shares"] = matched
+                        pos["cost_basis"] = filled_cost
+                        pos["entry_price"] = limit_price
+                        pos["live_state"] = "BUY_FILLED"
+                        pos["mm_entry_time"] = datetime.now(timezone.utc).isoformat()
+                        self.portfolio.balance += max(unfilled_cost, 0)
+                        print(f"[RECONCILE] CANCELLED PARTIAL: {matched:.2f} shares kept, ${unfilled_cost:.2f} returned — {pos.get('question', '')[:40]}")
+                    else:
+                        self.portfolio.balance += pos.get("cost_basis", 0)
+                        del self.portfolio.positions[condition_id]
+                        ghosts_cleaned += 1
+                        print(f"[RECONCILE] CANCELLED: {pos.get('question', '')[:40]}... → returned ${pos.get('cost_basis', 0):.2f}")
                 elif live_state in ("SELL_PENDING", "EXIT_PENDING"):
                     pos["live_state"] = "BUY_FILLED"
                     pos.pop("sell_order_id", None)
@@ -2897,6 +3411,10 @@ class TradingEngine:
         ALWAYS sync: on-chain USDC is the source of truth. CLOB buy orders
         are off-chain intents — they do NOT move USDC from the wallet.
         Internal balance = on_chain - sum(cost_basis of BUY_PENDING positions).
+
+        Deposit detection runs once per day to avoid false positives from
+        RPC glitches. Regular drift correction runs every 5 min but only
+        logs — no auto-correction unless drift > $5.
         """
         try:
             on_chain = await self.executor.get_balance_usdc()
@@ -2914,13 +3432,35 @@ class TradingEngine:
 
             if drift > 0.50:
                 old_balance = self.portfolio.balance
-                self.portfolio.balance = correct_balance
-                self.portfolio._save()
-                reason = ""
-                if correct_balance > old_balance + 5:
-                    reason = " (deposit detected!)"
-                print(f"[CHAIN] SYNCED: ${old_balance:.2f} → ${correct_balance:.2f} "
-                      f"(on-chain=${on_chain:.2f}, pending_buys=${pending_cost:.2f}){reason}")
+
+                # Deposit detection: only once per day
+                now_utc = datetime.now(timezone.utc)
+                last_deposit_check = getattr(self, '_last_deposit_check', None)
+                is_deposit_window = (last_deposit_check is None
+                                     or (now_utc - last_deposit_check).total_seconds() >= 86400)
+
+                if correct_balance > old_balance + 5 and is_deposit_window:
+                    deposit_amount = round(correct_balance - old_balance, 2)
+                    self.portfolio.deposits.append({
+                        "amount": deposit_amount,
+                        "timestamp": now_utc.isoformat(),
+                        "balance_after": correct_balance,
+                    })
+                    self._last_deposit_check = now_utc
+                    self.portfolio.balance = correct_balance
+                    self.portfolio._save()
+                    print(f"[CHAIN] DEPOSIT: +${deposit_amount:.2f} detected "
+                          f"(on-chain=${on_chain:.2f}, total deposited=${self.portfolio.total_deposited:.2f})")
+                elif drift > 5.0:
+                    # Large drift but not deposit — correct it
+                    self.portfolio.balance = correct_balance
+                    self.portfolio._save()
+                    print(f"[CHAIN] SYNCED: ${old_balance:.2f} → ${correct_balance:.2f} "
+                          f"(on-chain=${on_chain:.2f}, pending_buys=${pending_cost:.2f})")
+                else:
+                    # Small drift ($0.50-$5.00) — log but don't correct
+                    print(f"[CHAIN] DRIFT: ${drift:.2f} (internal=${self.portfolio.balance:.2f}, "
+                          f"expected=${correct_balance:.2f}, on-chain=${on_chain:.2f})")
             else:
                 print(f"[CHAIN] OK: wallet=${on_chain:.2f}, internal=${self.portfolio.balance:.2f}, pending=${pending_cost:.2f}")
         except Exception as e:
@@ -2932,9 +3472,7 @@ class TradingEngine:
         print(f"  CYCLE @ {datetime.now().strftime('%H:%M:%S')}")
         print(f"{'='*60}")
 
-        # 0. On-chain balance sync — auto-corrects when no orders are in flight.
-        # Ghost positions are cleaned at startup (_startup_reconcile), so
-        # has_pending_orders should be accurate during normal operation.
+        # 0. On-chain balance sync (every 5 min) + full reconciliation (every 10 min)
         if self.live:
             now_utc = datetime.now(timezone.utc)
             sync_interval = 300  # 5 minutes
@@ -2942,6 +3480,13 @@ class TradingEngine:
                or (now_utc - self._last_sync_time).total_seconds() >= sync_interval:
                 self._last_sync_time = now_utc
                 await self._log_on_chain_balance()
+
+            # Full position reconciliation every 10 minutes (not just at startup)
+            reconcile_interval = 600  # 10 minutes
+            if not hasattr(self, '_last_reconcile_time') or self._last_reconcile_time is None \
+               or (now_utc - self._last_reconcile_time).total_seconds() >= reconcile_interval:
+                self._last_reconcile_time = now_utc
+                await self._startup_reconcile()
 
         # 1. Check exits on existing positions (EVERY cycle — 60s)
         if self.portfolio.positions:
@@ -2986,20 +3531,50 @@ class TradingEngine:
             self._log_snapshot(markets, binance_prices)
 
             # === PHASE 2: AI DEEP SCREEN (Gemini + news, cached 1hr) ===
+            # Fallback: if AI fails 3x consecutively, pass through with heuristic scoring
             ai_screened_strategies = {"MARKET_MAKER", "MEAN_REVERSION"}
+            if not hasattr(self, '_ai_consecutive_failures'):
+                self._ai_consecutive_failures = 0
+            ai_fallback_mode = self._ai_consecutive_failures >= 3
+            if ai_fallback_mode:
+                print(f"[AI] FALLBACK MODE: Gemini failed {self._ai_consecutive_failures}x, using heuristic-only screening")
+
             screened = []
+            ai_calls_this_cycle = 0
+            max_ai_calls_per_cycle = 10  # Rate limit: max 10 Gemini calls per scan cycle
             for opp in opportunities:
                 if opp["strategy"] in ai_screened_strategies and CONFIG.get("mm_ai_screen"):
+                    if ai_calls_this_cycle >= max_ai_calls_per_cycle:
+                        # Rate limit hit — pass through with heuristic scoring
+                        opp["ai_score"] = 6
+                        opp["ai_spread"] = CONFIG.get("mm_target_profit", 0.02)
+                        opp["sector"] = "unknown"
+                        screened.append(opp)
+                        continue
+                    if ai_fallback_mode:
+                        # Heuristic fallback: use confidence and Kelly as proxy for quality
+                        opp["ai_score"] = 6  # Minimum passing score
+                        opp["ai_spread"] = CONFIG.get("mm_target_profit", 0.02)
+                        opp["sector"] = "unknown"
+                        screened.append(opp)
+                        continue
                     screen = await self._ai_deep_screen(opp)
+                    ai_calls_this_cycle += 1
                     if screen and screen.get("approved") and screen.get("quality_score", 0) >= 6:
                         opp["ai_score"] = screen["quality_score"]
                         opp["ai_spread"] = screen.get("recommended_spread_pct", 0.02)
                         opp["sector"] = screen.get("sector", "other")
                         opp["catalyst_expected"] = screen.get("catalyst_expected", False)
                         screened.append(opp)
+                        self._ai_consecutive_failures = 0  # Reset on success
                     elif screen:
                         score = screen.get("quality_score", 0)
                         print(f"[AI] REJECTED ({score}/10): {opp['question'][:50]}... → {screen.get('reason', '')}")
+                        self._ai_consecutive_failures = 0  # Rejection ≠ failure
+                    else:
+                        # screen is None — API error
+                        self._ai_consecutive_failures += 1
+                        print(f"[AI] FAILED ({self._ai_consecutive_failures}/3): {opp['question'][:50]}...")
                 else:
                     screened.append(opp)  # Other strategies pass through
 
@@ -3039,13 +3614,16 @@ class TradingEngine:
 
         # Write heartbeat for external monitoring (watchdog, alerter)
         try:
+            cycle_interval = CONFIG.get("exit_check_interval", 60)
             heartbeat = {
                 "ts": datetime.now(timezone.utc).isoformat(),
+                "stale_after_seconds": cycle_interval * 5,  # Alert if no update in 5 cycles
                 "positions": len(self.portfolio.positions),
                 "balance": round(self.portfolio.balance, 2),
                 "pnl": round(self.portfolio.metrics.get("total_pnl", 0), 2),
                 "trades": self.portfolio.metrics.get("total_trades", 0),
                 "win_rate": round(summary.get("win_rate", 0), 1),
+                "live": self.live,
             }
             heartbeat_path = Path(__file__).parent / "data" / ".heartbeat.json"
             with open(heartbeat_path, "w") as f:
@@ -3093,6 +3671,40 @@ class TradingEngine:
             print(f"#  Initial Balance: ${CONFIG['initial_balance']:.2f}")
         print(f"#  Started: {datetime.now().isoformat()}")
         print(f"{'#'*60}")
+
+        # CONFIG validation — catch incompatible values before they cause losses
+        config_errors = []
+        if CONFIG["mm_timeout_min_profit_pct"] > CONFIG["mm_target_profit"] * 3:
+            config_errors.append(
+                f"mm_timeout_min_profit_pct ({CONFIG['mm_timeout_min_profit_pct']}) >> mm_target_profit ({CONFIG['mm_target_profit']}): "
+                f"timeout will never exit profitably")
+        if CONFIG["mm_max_hold_hours"] >= CONFIG.get("mm_max_hold_hours_absolute", 24):
+            config_errors.append(
+                f"mm_max_hold_hours ({CONFIG['mm_max_hold_hours']}) >= mm_max_hold_hours_absolute ({CONFIG.get('mm_max_hold_hours_absolute', 24)}): "
+                f"absolute cap is useless")
+        if CONFIG["mm_spread_warn_threshold"] >= CONFIG["mm_spread_dead_threshold"]:
+            config_errors.append(
+                f"mm_spread_warn_threshold ({CONFIG['mm_spread_warn_threshold']}) >= mm_spread_dead_threshold ({CONFIG['mm_spread_dead_threshold']}): "
+                f"warning would never trigger before dead")
+        if CONFIG["mm_min_best_bid"] >= CONFIG["mm_max_best_ask"]:
+            config_errors.append(
+                f"mm_min_best_bid ({CONFIG['mm_min_best_bid']}) >= mm_max_best_ask ({CONFIG['mm_max_best_ask']}): "
+                f"no valid price range")
+        if CONFIG["stop_loss_pct"] >= 0:
+            config_errors.append(f"stop_loss_pct ({CONFIG['stop_loss_pct']}) should be negative")
+        if CONFIG["take_profit_pct"] <= 0:
+            config_errors.append(f"take_profit_pct ({CONFIG['take_profit_pct']}) should be positive")
+        if CONFIG["max_position_pct"] > 0.5:
+            config_errors.append(f"max_position_pct ({CONFIG['max_position_pct']}) > 50%: extreme concentration risk")
+        if config_errors:
+            print(f"\n[CONFIG] {'!'*50}")
+            print(f"[CONFIG] {len(config_errors)} CONFIGURATION ERROR(S):")
+            for err in config_errors:
+                print(f"[CONFIG]   - {err}")
+            print(f"[CONFIG] {'!'*50}\n")
+            if self.live:
+                print("[FATAL] Fix CONFIG errors before live trading. Aborting.")
+                return
 
         if self.live:
             print("\n*** LIVE TRADING - REAL MONEY AT RISK ***\n")

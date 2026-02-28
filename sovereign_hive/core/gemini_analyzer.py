@@ -8,12 +8,11 @@ Free tier: 15 RPM, 1M tokens/day
 Paid: $0.075/1M input tokens (10x cheaper than alternatives)
 """
 
-import asyncio
 import aiohttp
 import os
 import json
 from datetime import datetime, timezone
-from typing import Optional, List, Dict
+from typing import Optional, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,193 +33,6 @@ class GeminiAnalyzer:
         self._last_reset = datetime.now(timezone.utc)
         self._screen_cache: Dict[str, tuple] = {}  # {condition_id: (result, timestamp)}
 
-    async def analyze_news(self, headline: str, description: str, market_question: str) -> dict:
-        """
-        Analyze if news is relevant to a market and determine direction.
-
-        Returns:
-        {
-            "is_relevant": bool,
-            "direction": "BULLISH" | "BEARISH" | "NEUTRAL",
-            "confidence": 0.0-1.0,
-            "reasoning": str,
-            "action": "BUY_YES" | "BUY_NO" | "HOLD"
-        }
-        """
-        if not self.api_key:
-            return self._fallback_analysis(headline, description)
-
-        prompt = f"""You are a prediction market analyst. Analyze this news for trading.
-
-MARKET QUESTION: {market_question}
-
-NEWS HEADLINE: {headline}
-
-NEWS DESCRIPTION: {description}
-
-Respond ONLY with valid JSON (no markdown, no explanation):
-{{
-    "is_relevant": true/false,
-    "direction": "BULLISH" or "BEARISH" or "NEUTRAL",
-    "confidence": 0.0 to 1.0,
-    "reasoning": "one sentence explanation",
-    "action": "BUY_YES" or "BUY_NO" or "HOLD"
-}}
-
-Rules:
-- is_relevant: Does this news DIRECTLY affect the market question?
-- direction: BULLISH = increases YES probability, BEARISH = increases NO probability
-- confidence: How certain are you? (0.5 = uncertain, 0.9 = very confident)
-- action: What should a trader do? HOLD if uncertain or irrelevant."""
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{GEMINI_API_URL}?key={self.api_key}"
-                payload = {
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.1,  # Low temperature for consistent output
-                        "maxOutputTokens": 200
-                    }
-                }
-
-                async with session.post(url, json=payload, timeout=10) as resp:
-                    self._request_count += 1
-
-                    if resp.status == 200:
-                        data = await resp.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"]
-
-                        # Parse JSON from response
-                        # Clean up potential markdown formatting
-                        text = text.strip()
-                        if text.startswith("```"):
-                            text = text.split("```")[1]
-                            if text.startswith("json"):
-                                text = text[4:]
-
-                        result = json.loads(text.strip())
-                        result["model"] = "gemini-1.5-flash"
-                        result["analyzed_at"] = datetime.now(timezone.utc).isoformat()
-                        return result
-
-                    elif resp.status == 429:
-                        print("[GEMINI] Rate limited - using fallback")
-                        return self._fallback_analysis(headline, description)
-                    else:
-                        error = await resp.text()
-                        print(f"[GEMINI] Error {resp.status}: {error[:100]}")
-                        return self._fallback_analysis(headline, description)
-
-        except json.JSONDecodeError as e:
-            print(f"[GEMINI] JSON parse error: {e}")
-            return self._fallback_analysis(headline, description)
-        except Exception as e:
-            print(f"[GEMINI] Error: {e}")
-            return self._fallback_analysis(headline, description)
-
-    def _fallback_analysis(self, headline: str, description: str) -> dict:
-        """Simple keyword-based fallback when Gemini unavailable."""
-        text = f"{headline} {description}".lower()
-
-        bullish = ["wins", "leads", "ahead", "surges", "confirms", "approved", "victory"]
-        bearish = ["loses", "behind", "crashes", "denied", "rejected", "fails", "defeat"]
-
-        bull_count = sum(1 for w in bullish if w in text)
-        bear_count = sum(1 for w in bearish if w in text)
-
-        if bull_count > bear_count:
-            direction = "BULLISH"
-            action = "BUY_YES"
-        elif bear_count > bull_count:
-            direction = "BEARISH"
-            action = "BUY_NO"
-        else:
-            direction = "NEUTRAL"
-            action = "HOLD"
-
-        return {
-            "is_relevant": True,  # Assume relevant in fallback
-            "direction": direction,
-            "confidence": 0.5,
-            "reasoning": "Fallback keyword analysis (Gemini unavailable)",
-            "action": action,
-            "model": "fallback"
-        }
-
-    async def batch_analyze(self, articles: List[dict], market_question: str) -> List[dict]:
-        """Analyze multiple articles for a single market."""
-        results = []
-
-        for article in articles[:5]:  # Limit to 5 per market
-            result = await self.analyze_news(
-                headline=article.get("title", ""),
-                description=article.get("description", ""),
-                market_question=market_question
-            )
-            result["headline"] = article.get("title", "")[:80]
-            results.append(result)
-
-            # Respect rate limits (15 RPM = 1 every 4 seconds)
-            await asyncio.sleep(0.5)
-
-        return results
-
-    def get_consensus(self, analyses: List[dict]) -> dict:
-        """Get consensus direction from multiple article analyses."""
-        if not analyses:
-            return {
-                "direction": "NEUTRAL",
-                "confidence": 0.0,
-                "action": "HOLD",
-                "article_count": 0
-            }
-
-        # Only count relevant articles
-        relevant = [a for a in analyses if a.get("is_relevant", False)]
-
-        if not relevant:
-            return {
-                "direction": "NEUTRAL",
-                "confidence": 0.0,
-                "action": "HOLD",
-                "article_count": len(analyses),
-                "relevant_count": 0
-            }
-
-        # Count directions
-        bullish = sum(1 for a in relevant if a["direction"] == "BULLISH")
-        bearish = sum(1 for a in relevant if a["direction"] == "BEARISH")
-        neutral = sum(1 for a in relevant if a["direction"] == "NEUTRAL")
-
-        # Weighted by confidence
-        bull_weight = sum(a["confidence"] for a in relevant if a["direction"] == "BULLISH")
-        bear_weight = sum(a["confidence"] for a in relevant if a["direction"] == "BEARISH")
-
-        if bull_weight > bear_weight + 0.3:
-            direction = "BULLISH"
-            action = "BUY_YES"
-            confidence = bull_weight / len(relevant)
-        elif bear_weight > bull_weight + 0.3:
-            direction = "BEARISH"
-            action = "BUY_NO"
-            confidence = bear_weight / len(relevant)
-        else:
-            direction = "NEUTRAL"
-            action = "HOLD"
-            confidence = 0.5
-
-        return {
-            "direction": direction,
-            "confidence": round(confidence, 2),
-            "action": action,
-            "article_count": len(analyses),
-            "relevant_count": len(relevant),
-            "bullish_count": bullish,
-            "bearish_count": bearish,
-            "neutral_count": neutral
-        }
-
     def _get_cached(self, condition_id: str) -> Optional[dict]:
         """Return cached screen result if still valid (1-hour TTL)."""
         if condition_id in self._screen_cache:
@@ -235,14 +47,6 @@ Rules:
     def _set_cache(self, condition_id: str, result: dict):
         """Cache a screen result with current timestamp."""
         self._screen_cache[condition_id] = (result, datetime.now(timezone.utc))
-
-    async def screen_market(self, question: str, price: float, end_date: str, volume_24h: float) -> dict:
-        """Basic AI screen (legacy). Use deep_screen_market() for the full pipeline."""
-        return await self.deep_screen_market(
-            question=question, price=price, end_date=end_date,
-            volume_24h=volume_24h, spread_pct=0.0, liquidity=0.0,
-            best_bid=0.0, best_ask=0.0, news_headlines=[], days_to_resolve=0,
-        )
 
     async def deep_screen_market(
         self,
@@ -489,6 +293,13 @@ CONTEXT:
 - STOP_LOSS means price dropped 3%+ — could be temporary dip or real move
 - SELL_FAILED means CLOB rejected our sell orders — technical issue, not market issue
 
+CRITICAL SPREAD RULE:
+- Bid-ask spread = {((best_ask - best_bid) / max(best_ask, 0.01)) * 100:.0f}%
+- If spread > 20%, the orderbook is DEAD — there is no liquidity to exit at a fair price.
+  ALWAYS recommend SELL at best_bid when spread > 20%. Holding a position in a dead orderbook
+  is pointless — you will be stuck until market resolution. Exit NOW at best_bid.
+- Never recommend HOLD when spread > 20%.
+
 Respond ONLY with valid JSON (no markdown):
 {{"action":"HOLD","true_probability":0.85,"sell_price":0.83,"reason":"one sentence"}}
 
@@ -532,6 +343,116 @@ Be data-driven. If the event is very likely (>80% true prob), holding is usually
             print(f"[GEMINI] Exit eval error: {e}")
             return default
 
+    async def evaluate_exit_with_context(
+        self,
+        question: str,
+        entry_price: float,
+        current_price: float,
+        hold_hours: float,
+        best_bid: float,
+        best_ask: float,
+        external_context: str = "",
+        position_size_usd: float = 0.0,
+    ) -> dict:
+        """
+        Enhanced exit evaluation with external intelligence from the monitor agent.
+
+        Called by ai_position_review.py when the monitor provides WebSearch context
+        (polling data, match results, news) that Gemini doesn't have natively.
+
+        Returns:
+            {
+                "action": "HOLD" | "SELL",
+                "true_probability": 0.0-1.0,
+                "sell_price": float,
+                "reason": str,
+                "confidence": 0.0-1.0,
+            }
+        """
+        default = {
+            "action": "HOLD", "true_probability": current_price,
+            "reason": "No API key — holding by default", "confidence": 0.5,
+        }
+        if not self.api_key:
+            return default
+
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+
+        context_section = ""
+        if external_context:
+            context_section = f"""
+EXTERNAL INTELLIGENCE (from real-time web research by monitor agent):
+{external_context}
+
+IMPORTANT: The above intelligence is CURRENT and comes from live web searches.
+Weight it heavily — it may contain information not yet reflected in the market price."""
+
+        size_section = ""
+        if position_size_usd > 0:
+            size_section = f"\nPOSITION SIZE: ${position_size_usd:.2f} at risk"
+
+        prompt = f"""You are a prediction market risk manager reviewing a position for the autonomous monitor.
+
+MARKET: {question}
+ENTRY PRICE: ${entry_price:.3f} (our cost basis)
+CURRENT PRICE: ${current_price:.3f} (market mid)
+BEST BID: ${best_bid:.3f} | BEST ASK: ${best_ask:.3f}
+UNREALIZED P&L: {pnl_pct:+.1f}%
+HOLD TIME: {hold_hours:.1f} hours{size_section}
+{context_section}
+
+KEY QUESTION: Given ALL available information (market data + external intelligence),
+what is the TRUE probability of this event occurring?
+
+- If true probability > current price → HOLD (we have edge, market hasn't caught up)
+- If true probability < current price → SELL (market is overpricing, or we have negative info)
+- If true probability ≈ current price → SELL at break-even if possible
+
+Respond ONLY with valid JSON (no markdown):
+{{"action":"HOLD","true_probability":0.85,"sell_price":0.83,"reason":"one sentence","confidence":0.8}}
+
+action: "HOLD" to keep position, "SELL" to exit
+true_probability: your estimate (0.0-1.0) — factor in the external intelligence
+sell_price: if SELL, target price (use best_bid for urgency, entry_price for break-even)
+reason: brief explanation referencing the evidence
+confidence: how confident you are in your assessment (0.0-1.0)
+
+Be data-driven. External intelligence (polls, results, news) should OVERRIDE generic priors."""
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{GEMINI_API_URL}?key={self.api_key}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 200}
+                }
+                async with session.post(url, json=payload, timeout=10) as resp:
+                    self._request_count += 1
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if text.startswith("```"):
+                            text = text.split("```")[1]
+                            if text.startswith("json"):
+                                text = text[4:]
+                        result = json.loads(text.strip())
+                        result.setdefault("action", "HOLD")
+                        result.setdefault("true_probability", current_price)
+                        result.setdefault("sell_price", entry_price)
+                        result.setdefault("reason", "")
+                        result.setdefault("confidence", 0.5)
+                        # Safety: never sell below 90% of entry
+                        if result["action"] == "SELL":
+                            min_price = entry_price * 0.90
+                            if result["sell_price"] < min_price:
+                                result["sell_price"] = min_price
+                        return result
+                    else:
+                        return default
+        except Exception as e:
+            print(f"[GEMINI] Exit-with-context eval error: {e}")
+            return default
+
     def get_usage_stats(self) -> dict:
         """Get API usage stats."""
         return {
@@ -540,61 +461,3 @@ Be data-driven. If the event is very likely (>80% true prob), holding is usually
         }
 
 
-async def test_gemini():
-    """Test Gemini analyzer with sample data."""
-    print("=" * 60)
-    print("  GEMINI ANALYZER TEST")
-    print("=" * 60)
-    print()
-
-    analyzer = GeminiAnalyzer()
-
-    if not analyzer.api_key:
-        print("ERROR: GEMINI_API_KEY not set in .env")
-        return
-
-    # Test cases
-    tests = [
-        {
-            "market": "Will Trump win the 2024 election?",
-            "headline": "Trump leads Biden by 5 points in new national poll",
-            "description": "A new Reuters poll shows Trump ahead with 48% to Biden's 43%"
-        },
-        {
-            "market": "Will the Seahawks win Super Bowl 2026?",
-            "headline": "Seahawks quarterback suffers season-ending injury",
-            "description": "Starting QB out for remainder of season after ACL tear"
-        },
-        {
-            "market": "Will Bitcoin hit $100k by 2025?",
-            "headline": "Taylor Swift announces new album tour dates",
-            "description": "Pop star reveals 50-city world tour starting in March"
-        }
-    ]
-
-    for test in tests:
-        print(f"Market: {test['market']}")
-        print(f"News: {test['headline'][:50]}...")
-
-        result = await analyzer.analyze_news(
-            headline=test["headline"],
-            description=test["description"],
-            market_question=test["market"]
-        )
-
-        print(f"  Relevant: {result['is_relevant']}")
-        print(f"  Direction: {result['direction']}")
-        print(f"  Confidence: {result['confidence']:.0%}")
-        print(f"  Action: {result['action']}")
-        print(f"  Reasoning: {result['reasoning']}")
-        print(f"  Model: {result.get('model', 'unknown')}")
-        print()
-
-        await asyncio.sleep(1)
-
-    print("=" * 60)
-    print(f"Usage: {analyzer.get_usage_stats()}")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_gemini())

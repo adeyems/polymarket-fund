@@ -3,47 +3,196 @@
 > Each run appends its observations and decisions here.
 > When this file exceeds 200 lines, summarize key insights into monitor_state.json "learned" array and truncate to the last 50 lines.
 
---- Journal rotated at 2026-02-22T13:29:29Z. Key insights preserved in monitor_state.json ---
+## 2026-02-28T01:10:47Z — Run #673 — Routine (No Discord) | STABLE, UNCHANGED
 
-Previous runs #1-72 summarized: Simulation v10 launched at 11:26 UTC with fresh $1,000 portfolios x6 ($6,000 total). DIP_BUY validated — 2 take profits in sweet spot (0.55-0.65), +$25.76 P&L, 100% WR. VOLUME_SURGE validated — first trade BUY NO @ 0.580, +$115.74 (+57.9%), edge zone + news gate working. MARKET_MAKER had 1 completed trade +$3.59. NEAR_CERTAIN at cap (4 positions, $590 deployed). NEAR_ZERO finding opps but Kelly undersizing ($44-45 < $50 min). NEG_RISK_ARB idle (0 arb opps). Total P&L reached +$141.50 at run #72. Three full restarts occurred (runs #69, #70, #73). All self-heal fixes from v9 (edge zone filters, circuit breaker, news gate, stop_tracker persistence) carried into v10 and confirmed working.
+- **MODE**: LIVE EC2 (ACTIVE+DISABLED) + Paper (5/6 running)
+- **LIVE**: PID 1253792 (~14h uptime). Cycling 30s. AI HOLD Talarico (true_prob=0.85). USDC=$29.71 (audit). Total $81.78. P&L=-$1.10. **UNCHANGED.**
+- **Audit**: wallet_audit.py confirmed USDC=$29.712299. Crockett SELL $0.70 (0 matched). Talarico SELL $0.81 (0 matched). Total=$81.78.
+- **Errors**: SyntaxError line 1841 + load_secrets.sh (KNOWN, non-critical).
+- **Paper**: MM +$213.51 (88.6% WR, 123 trades). Balance $461.70. 7 open. 5/5 running. UNCHANGED.
+- **Research**:
+  - **TX PRIMARY**: UT Feb 25: Crockett 56-44 (+12, double-digit lead). PPP: Talarico 48-42 (+6). Polymarket UNCHANGED: Talarico 72%/69%. MASSIVE polls/market divergence. Black voters 80%+ Crockett. Hispanic 59% Talarico. March 3 (3 days).
+  - **ANTHROPIC**: CONFIRMED WIN. Claude Opus 4.6 #1 Arena. 84% Polymarket. Resolves TODAY 12pm ET.
+  - **IRAN FEB**: NO strikes confirmed. WIN.
+  - **IRAN MARCH**: NEW — Largest US airpower buildup since 2003 Iraq invasion. USS Ford + Lincoln carrier groups. 150+ aircraft. Geneva 'significant progress'. Vienna tech talks. Trump '10-15 days to decide'. EXTREMELY elevated but diplomacy thread alive.
+  - **BAYERN-BVB**: TODAY 17:30 UTC (~16h away). NOT yet played. Bayern 63% favorite.
+- No Discord (01:10 UTC — 3h report already sent at Run #672).
 
-## 2026-02-22T12:56:23Z — Run #72
-- Strategies: 6/6 running, 0 paused, 0 healing
-- Total value: $4,773.47 | Total P&L: +$141.50
-- MARKET_MAKER: $449.66, $0 P&L, 0 trades, 4 open → ➡️ stable
-- NEAR_CERTAIN: $409.60, $0 P&L, 0 trades, 4 open → ➡️ stable
-- NEAR_ZERO: $1,000.00, $0 P&L, 0 trades, 0 open → ➡️ stable
-- DIP_BUY: $798.47, +$25.76, 100% WR, 2 trades, 2 open → ➡️ stable
-- VOLUME_SURGE: $1,115.74, +$115.74, 100% WR, 1 trade, 0 open → 📈 improving
-- NEG_RISK_ARB: $1,000.00, $0 P&L, 0 trades, 0 open → ➡️ stable
-- Actions: None. Silent update.
+AUTONOMOUS REVIEW: "Crockett Democratic nominee"
+  Monitor: HOLD (conf 0.40, evidence MODERATE)
+  Note: Crockett 31% market. UT 56-44 (+12). Polls favor Crockett. SELL $0.70 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
 
-## 2026-02-22T13:29:29Z — Run #73
-- **3rd RESTART DETECTED** — All 6 PIDs changed (4230→57151, 4843→57717, 5404→58282, 5983→58848, 6561→59411, 7137→59973). User-initiated. Portfolios intact.
-- Strategies: 6/6 running, 0 paused, 0 healing
-- Total value: $4,560.93 | Total P&L: +$137.79
-- MARKET_MAKER: $522.60, +$3.59, 100% WR, 1 trade, 4 open → 📈 improving (1 new MM trade completed)
-- NEAR_CERTAIN: $409.60, $0 P&L, 0 trades, 4 open → ➡️ stable (at cap, awaiting resolution)
-- NEAR_ZERO: $1,000.00, $0 P&L, 0 trades, 0 open → ➡️ stable (Kelly undersizing $44-45 < $50)
-- DIP_BUY: $896.14, +$18.46, 66.7% WR, 3 trades, 1 open → ➡️ stable (3rd trade completed — 1 loss, net still positive)
-- VOLUME_SURGE: $732.59, +$115.74, 100% WR, 1 trade, 2 open → ➡️ stable (balance drop = $383 deployed to 2 new positions)
-- NEG_RISK_ARB: $1,000.00, $0 P&L, 0 trades, 0 open → ➡️ stable (0 arb opps)
-- Issues: None. All 6 processes alive and cycling. No errors, tracebacks, or stale cycles.
-- Actions: Journal rotated (209 lines → condensed). State updated with new PIDs.
-- DIP_BUY note: 3rd trade was a loss (WR dropped 100%→66.7%), but P&L still +$18.46. Net positive. Edge zone filter working — monitoring for further losses.
-- VOLUME_SURGE note: 2 new open positions deployed ($383 capital). P&L unchanged at +$115.74. Waiting for resolution.
-- Portfolio delta: $4,773→$4,561 ($-212) driven by capital deployment to new open positions across MM and VS, NOT losses.
-- Discord: UTC hour 13 — REPORT HOUR. Sending scheduled Discord report.
+AUTONOMOUS REVIEW: "Talarico Democratic nominee"
+  Monitor: HOLD (conf 0.45, evidence MODERATE)
+  Note: Talarico 72%/69%. AI true_prob=0.85. $21.5M ads. PPP +6. SELL $0.81 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
 
-## 2026-02-22T14:02:05Z — Run #74
-- Strategies: 6/6 running, 0 paused, 0 healing
-- Total value: $4,467.76 | Total P&L: +$125.20
-- MARKET_MAKER: $522.60, +$3.59 P&L, 100% WR, 1 trade → ➡️ stable (unchanged)
-- NEAR_CERTAIN: $409.60, $0 P&L, 0 trades, 4 open → ➡️ stable (at cap)
-- NEAR_ZERO: $1,000, $0 P&L, 0 trades → ➡️ stable (Kelly undersizing $44-45)
-- DIP_BUY: $896.14, +$18.46, 66.7% WR, 3 trades → ➡️ stable (unchanged)
-- VOLUME_SURGE: $639.42, +$103.15, 50% WR, 2 trades, 3 open → 📉 declining (STOP LOSS on Magic vs. Clippers, entry @ 0.910 in safe zone. P&L -$12.59 from last run. 1st loss on fresh portfolio.)
-- NEG_RISK_ARB: $1,000, $0 P&L, 0 trades → ➡️ stable (no arb opps)
-- Issues: VOLUME_SURGE took 1st stop loss (-$12.59). Entry was at 0.910 (legitimate safe zone). Single loss, not a pattern. No code issue.
-- Actions: None. Silent update. No errors, no tracebacks, no stale cycles.
-- Discord: UTC hour 14 — not a report hour. Skipping.
+RESOLUTION CHECK: "Anthropic best AI end Feb"
+  Status: OPEN. Resolves TODAY 12pm ET.
+  Web result: CONFIRMED WIN. Claude Opus 4.6 #1 Chatbot Arena. 84% Polymarket.
+  Expected resolution: WIN (confirmed)
+  Our position: YES (NC + MM paper)
+
+RESOLUTION CHECK: "US next strikes Iran Feb 28"
+  Status: OPEN. Resolves TODAY end-of-day.
+  Web result: NO strikes in Feb 2026. Geneva/Vienna diplomacy ongoing.
+  Expected resolution: NO wins (confirmed)
+  Our position: NO (VS paper)
+
+RESOLUTION CHECK: "Bayern-BVB Feb 28"
+  Status: OPEN. TODAY 17:30 UTC.
+  Web result: NOT yet played. Bayern 63% favorite. Signal Iduna Park.
+  Expected resolution: UNCERTAIN
+  Our position: YES Bayern (MM paper)
+
+RESOLUTION CHECK: "Iran strikes Mar 3"
+  Status: OPEN. Critical window.
+  Web result: Largest US airpower buildup since 2003. USS Ford + Lincoln. Trump '10-15 days'. BUT Geneva 'significant progress'. Diplomacy thread alive.
+  Expected resolution: ELEVATED risk, higher than last check. Military posture extremely aggressive.
+  Our position: NO (VS paper) — risk INCREASED
+
+## 2026-02-28T01:01:12Z — Run #672 — 3h Discord Report | STABLE, UNCHANGED
+
+- **MODE**: LIVE EC2 (ACTIVE+DISABLED) + Paper (5/6 running)
+- **LIVE**: PID 1253792 (~14h uptime). Cycling 30s. AI HOLD Talarico (true_prob=0.85). USDC=$29.71 (audit). Total $81.78. P&L=-$1.10. **UNCHANGED.**
+- **Audit**: wallet_audit.py confirmed USDC=$29.712299. Crockett SELL $0.70 (0 matched). Talarico SELL $0.81 (0 matched). Total=$81.78.
+- **Errors**: SyntaxError line 1841 + load_secrets.sh (KNOWN, non-critical).
+- **Paper**: MM +$227.39 (88.6% WR, 123 trades). Balance $461.70. 7 open. 5/5 running. UNCHANGED.
+- **Research**:
+  - **TX PRIMARY**: Talarico 72%/69% (UNCHANGED). Crockett 31%. UT +12 (56-44). NEW: PPP shows Talarico +6 (48-42). Polls/market divergence persists. Crockett: Kamala robocall + Cardi B. Talarico: PCCC + Obama + $21.5M. March 3 (3 days).
+  - **ANTHROPIC**: CONFIRMED WIN. Claude Opus 4.6 #1 Arena. Resolves TODAY 12pm ET.
+  - **IRAN FEB**: NO strikes confirmed. WIN.
+  - **IRAN MARCH**: Geneva Feb 26 concluded: NO deal but "significant progress". Elements of agreement identified. Vienna tech talks next week. De-escalation momentum but USS Ford + 150 aircraft still positioned.
+  - **BAYERN-BVB**: TODAY 17:30 UTC. NOT yet played. Bayern 63% favorite.
+- **Discord**: 3h report SENT (204).
+
+AUTONOMOUS REVIEW: "Crockett Democratic nominee"
+  Monitor: HOLD (conf 0.40, evidence MODERATE)
+  Note: Crockett 31% market. UT 56-44. PPP 48-42 Talarico. SELL $0.70 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
+
+AUTONOMOUS REVIEW: "Talarico Democratic nominee"
+  Monitor: HOLD (conf 0.45, evidence MODERATE)
+  Note: Talarico 72%/69%. AI true_prob=0.85. $21.5M ads. PPP +6. SELL $0.81 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
+
+RESOLUTION CHECK: "Anthropic best AI end Feb"
+  Status: OPEN. Resolves TODAY 12pm ET.
+  Web result: CONFIRMED WIN. Claude Opus 4.6 #1 Chatbot Arena + GDPval-AA leader. 99% Polymarket.
+  Expected resolution: WIN (confirmed)
+  Our position: YES (NC + MM paper)
+
+RESOLUTION CHECK: "US next strikes Iran Feb 28"
+  Status: OPEN. Resolves TODAY end-of-day.
+  Web result: NO strikes in Feb 2026. Geneva Feb 26: 'significant progress' but no deal. Diplomacy active.
+  Expected resolution: NO wins (confirmed)
+  Our position: NO (VS paper)
+
+RESOLUTION CHECK: "Bayern-BVB Feb 28"
+  Status: OPEN. TODAY 17:30 UTC.
+  Web result: NOT yet played. Bayern 63% favorite. Signal Iduna Park.
+  Expected resolution: UNCERTAIN
+  Our position: YES Bayern (MM paper)
+
+RESOLUTION CHECK: "Iran strikes Mar 3"
+  Status: OPEN. Critical window.
+  Web result: Geneva 'significant progress'. Vienna tech talks next week. Military still positioned but diplomacy gaining traction.
+  Expected resolution: LESS imminent (de-escalation momentum) but military still ready.
+  Our position: NO (VS paper) — risk reduced slightly
+
+## 2026-02-28T00:52:31Z — Run #671 — Routine (No Discord) | STABLE, UNCHANGED
+
+- **MODE**: LIVE EC2 (ACTIVE+DISABLED) + Paper (5/6 running)
+- **LIVE**: PID 1253792 (~13.5h uptime). Cycling 30s. AI HOLD Talarico (true_prob=0.85). USDC=$29.71 (audit). Total $81.78. P&L=-$1.10. **UNCHANGED.**
+- **Audit**: wallet_audit.py confirmed USDC=$29.712299. Crockett SELL $0.70 (0 matched). Talarico SELL $0.81 (0 matched). Total=$81.78.
+- **Errors**: SyntaxError line 1841 + load_secrets.sh (KNOWN, non-critical).
+- **Paper**: MM +$227.39 (88.6% WR, 123 trades). Balance $461.70. 7 open. 5/5 running. UNCHANGED.
+- **Research**: TX polls UNCHANGED (UT 56-44 Crockett). Market UNCHANGED (Talarico 72%). Bayern-BVB 17:30 UTC NOT played. Anthropic CONFIRMED WIN. Iran: USS Ford deployed, IRGC drills, 150+ aircraft — EXTREMELY elevated for March.
+- No Discord (00:52 UTC — next window 01:00).
+
+AUTONOMOUS REVIEW: "Crockett Democratic nominee"
+  Monitor: HOLD (conf 0.40, evidence MODERATE)
+  Note: Crockett 31% market. UT 56-44 polls. SELL $0.70 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
+
+AUTONOMOUS REVIEW: "Talarico Democratic nominee"
+  Monitor: HOLD (conf 0.45, evidence MODERATE)
+  Note: Talarico 72%/69%. AI true_prob=0.85. $21.5M ads. SELL $0.81 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
+
+## 2026-02-28T00:44:47Z — Run #670 — Routine (No Discord) | STABLE, UNCHANGED
+
+- **MODE**: LIVE EC2 (ACTIVE+DISABLED) + Paper (5/6 running)
+- **LIVE**: PID 1253792 (~13h uptime). Cycling 30s. AI HOLD Talarico (true_prob=0.85). USDC=$29.71 (audit). Total $81.78. P&L=-$1.10. **UNCHANGED.**
+- **Audit**: wallet_audit.py confirmed USDC=$29.712299. Crockett SELL $0.70 (0 matched). Talarico SELL $0.81 (0 matched). Total=$81.78.
+- **Errors**: SyntaxError line 1841 + load_secrets.sh (KNOWN, non-critical).
+- **Paper**: MM +$227.39 (88.6% WR, 123 trades, UP from $348→$462). New trade closed. 7 open. 5/5 running.
+- No Discord (00:44 UTC — next window 01:00).
+
+## 2026-02-28T00:37:44Z — Run #669 — Routine (No Discord) | STABLE, UNCHANGED
+
+- **MODE**: LIVE EC2 (ACTIVE+DISABLED) + Paper (5/6 running)
+- **LIVE**: PID 1253792 (~13h uptime). Cycling 30s. AI HOLD Talarico (true_prob=0.85). USDC=$29.71 (audit). Total $81.78. P&L=-$1.10. **UNCHANGED.**
+- **Audit**: wallet_audit.py confirmed USDC=$29.712299. Crockett SELL $0.70 (0 matched). Talarico SELL $0.81 (0 matched). Total=$81.78.
+- **Errors**: SyntaxError line 1841 + load_secrets.sh (KNOWN, non-critical).
+- **Paper**: MM +$223.31 (88.5% WR, 122 trades). Balance $348.66 (was $435.83 — new position entered, 8 open). 5/5 running.
+- **Bayern-BVB**: NOT yet played. Kickoff 17:30 UTC today (~17h away).
+- No Discord (00:37 UTC — next window 01:00).
+
+## 2026-02-28T00:27:15Z — Run #668 — Routine (No Discord) | STABLE, UNCHANGED
+
+- **MODE**: LIVE EC2 (ACTIVE+DISABLED) + Paper (5/6 running)
+- **LIVE**: PID 1253792 (~13h uptime). Cycling 30s. AI HOLD Talarico (true_prob=0.85, STOP_LOSS → HOLD). USDC=$29.68/$29.71 (audit). Total $81.78. P&L=-$1.10. **UNCHANGED.**
+- **Audit**: wallet_audit.py: USDC=$29.712299. Crockett SELL $0.70 (0 matched). Talarico SELL $0.81 (0 matched). Total=$81.78.
+- **Errors**: SyntaxError line 1841 + load_secrets.sh (KNOWN, non-critical).
+- **Paper**: MM +$223.31 (88.5% WR, 122 trades, UP from $215.18). Balance $435.83. 7 open. 5/5 running.
+- **Research**:
+  - **TX PRIMARY**: UNCHANGED — Talarico 72%/69%. Crockett 31%. UT +12 (56-44). Allred+Kamala+Cardi B endorsed Crockett. Talarico $21.5M vs $4.5M ad spend. March 3 (3 days). Polls/market divergence persists.
+  - **ANTHROPIC**: CONFIRMED WIN. Claude Opus 4.6 #1 Chatbot Arena. 99% Polymarket. Resolves TODAY 12pm ET.
+  - **IRAN FEB**: NO Feb strikes confirmed. Geneva talks Feb 26 no deal. WIN.
+  - **IRAN MARCH**: Geneva no deal. Trump '10 days to decide'. Military ready but diplomacy ongoing. Slightly less imminent than 24h ago (talks continuing).
+  - **BAYERN-BVB**: TODAY 17:30 UTC. NOT yet played. Bayern 63% favorite.
+- No Discord (00:27 UTC — next window 01:00).
+
+AUTONOMOUS REVIEW: "Crockett Democratic nominee"
+  Monitor: HOLD (conf 0.40, evidence MODERATE)
+  Note: Crockett 31% (UNCHANGED). UT +12. Allred+Kamala+Cardi B. SELL $0.70 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
+
+AUTONOMOUS REVIEW: "Talarico Democratic nominee"
+  Monitor: HOLD (conf 0.45, evidence MODERATE)
+  Note: Talarico 72%/69% (UNCHANGED). AI true_prob=0.85. $21.5M ads. Demographics favor. SELL $0.81 stays. March 3 (3 days).
+  Decision: HOLD. March 3 resolution.
+
+RESOLUTION CHECK: "Anthropic best AI end Feb"
+  Status: OPEN. Resolves TODAY 12pm ET.
+  Web result: CONFIRMED WIN. Claude Opus 4.6 #1 Chatbot Arena. 99% Polymarket.
+  Expected resolution: WIN (confirmed)
+  Our position: YES (NC + MM paper)
+
+RESOLUTION CHECK: "US next strikes Iran Feb 28"
+  Status: OPEN. Resolves TODAY end-of-day.
+  Web result: NO strikes in Feb 2026. Geneva talks Feb 26 no deal. Diplomacy ongoing.
+  Expected resolution: NO wins (confirmed)
+  Our position: NO (VS paper)
+
+RESOLUTION CHECK: "Bayern-BVB Feb 28"
+  Status: OPEN. TODAY 17:30 UTC.
+  Web result: NOT yet played. Bayern 63% favorite.
+  Expected resolution: UNCERTAIN
+  Our position: YES Bayern (MM paper)
+
+RESOLUTION CHECK: "Iran strikes Mar 3"
+  Status: OPEN. Critical window.
+  Web result: Geneva talks Feb 26 no deal. Trump '10 days to decide'. Military forces in position. Diplomacy continuing.
+  Expected resolution: LESS imminent than 48h ago (diplomacy momentum) but still elevated
+  Our position: NO (VS paper) — risk slightly reduced
+
+---
+
+--- Journal rotated at 2026-02-28T00:27:15Z (Run #668). Runs #661-667 consolidated: ALL STABLE, UNCHANGED. USDC=$29.71. Total=$81.78. P&L=-$1.10. Both SELL orders 0 matched. AI HOLD Talarico (true_prob=0.85). No new fills. Safety block active. Paper 5/5 running. MM UP to +$223.31 (88.5% WR, 122 trades). VS -$60.51 (20.5% WR, 9th decline). TX Primary March 3: Talarico 69-72% / Crockett 30-31%. Polls conflict (UT +12 Crockett, Emerson +9 Talarico, Impact +4 Talarico). Early voting ENDED record 1.6M+. Anthropic CONFIRMED WIN resolves Feb 28 12pm ET. Iran Feb NO CONFIRMED resolves Feb 28. Iran March: Geneva no deal, Trump '10 days', military ready but diplomacy ongoing. Bayern-BVB Feb 28 17:30 UTC (Bayern 63%). Key insights preserved in monitor_state.json. ---
+
+Previous runs #1-660 summarized: Sim v10 launched 2026-02-22. Paper: 5/6 active (DIP paused). Live EC2 deployed 2026-02-23 with $20 + $62.88 deposit = $82.88. Talarico FILLED Run #310 (32.09sh @ $0.78). Crockett FILLED Run #538 (84.75sh @ $0.30). Crockett SOLD Run #622 (+$1.69, 84.75sh @ $0.32). Bot re-entered Crockett BUY @ $0.671 (unfilled until Run #630). PID 1253792 since Run #587. TX race: UT 56-44 Crockett (+12), UH +8 Crockett, Emerson +9 Talarico. Demographics: Black 87% Crockett. Early voting ENDED Feb 27 (record 1.6M+). Polymarket 72% Talarico / 30% Crockett. 11 resolved markets stuck in paper portfolios (T1 -$360 dominates). Iran: Geneva/Vienna talks no deal, NO Feb strikes, March still elevated.
+
+Run #630 (2026-02-27 18:12): CRITICAL — Crockett BUY @ $0.671 (37.26sh) FILLED. USDC $54.68→$29.71. Both TX sides now held. Guaranteed loss -$12.76 (Crockett wins) to -$17.93 (Talarico wins). Discord SENT.

@@ -376,6 +376,14 @@ class AsyncExecutor:
             raw = await asyncio.to_thread(contract.functions.balanceOf(address).call)
             decimals = await asyncio.to_thread(contract.functions.decimals().call)
             balance = raw / (10 ** decimals)
+
+            # Guard: free RPCs sometimes return 0 spuriously.
+            # If we previously saw a real balance and now see 0, treat as RPC error.
+            if balance == 0 and getattr(self, '_last_known_usdc', 0) > 1.0:
+                print(f"[EXEC] get_balance_usdc: RPC returned $0 (last known ${self._last_known_usdc:.2f}), treating as stale")
+                return None
+            if balance > 0:
+                self._last_known_usdc = balance
             return balance
         except Exception as e:
             print(f"[EXEC] get_balance_usdc error: {e}")

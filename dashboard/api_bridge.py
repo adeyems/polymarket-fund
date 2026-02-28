@@ -1,3 +1,15 @@
+# ═══════════════════════════════════════════════════════════════════════
+# DEPRECATED (2026-02-25): This file is INSECURE and must NOT be deployed.
+#
+# Security issues:
+#   - Binds to 0.0.0.0 (exposed to internet)
+#   - CORS allows all origins (*)
+#   - Unauthenticated WebSocket
+#   - Bot process coupled to API server
+#   - Led to EIP-7702 wallet drain (~$70 lost)
+#
+# Use dashboard/server.py instead (localhost-only, auth, read-only).
+# ═══════════════════════════════════════════════════════════════════════
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

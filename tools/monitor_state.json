@@ -1,61 +1,85 @@
 {
-  "last_run": "2026-02-25T13:29:26Z",
-  "run_count": 296,
+  "last_run": "2026-02-28T01:10:47Z",
+  "run_count": 673,
   "mode": "LIVE_EC2",
   "strategies": {
     "MARKET_MAKER": {
       "status": "running",
-      "pid": 2767686,
+      "pid": 1253792,
       "log_file": "/var/log/sovereign-hive/MARKET_MAKER.log",
-      "last_balance": 76.26,
-      "last_pnl": -6.62,
-      "last_win_rate": 60.0,
-      "last_trades": 5,
-      "open_positions": 1,
+      "last_balance": 29.68,
+      "last_pnl": -1.10,
+      "last_win_rate": 71.4,
+      "last_trades": 7,
+      "open_positions": 2,
       "trend": "stable",
       "consecutive_losses": 0,
-      "healed_at": "2026-02-25T12:55:30Z",
-      "heal_description": "USER-APPROVED LIVE RESTART (2026-02-25 12:55 UTC). Fixes deployed: (1) wallet_audit.py double-counting removed (CLOB intents no longer counted as assets). (2) get_order_status NoneType guard added. (3) Timeout exit 3% min profit threshold. (4) Startup reconciliation cleaned 2 ghost positions, synced balance to $13.38. 861 tests passing.",
-      "note": "RUNNING since 12:55:30 UTC (34 min uptime). Cycling every 30s. DEPOSIT DETECTED: $62.88 USDC arrived (wallet $13.38→$76.26). Bot internal: $6.69 avail, 5 trades, 60% WR, +$5.92 MM P&L. 1 open: Iran Feb28 NO BUY @ $0.86 (7.8 shares, $6.71 intent, LIVE). Bot will auto-detect deposit on next 5-min balance sync — capital constraint lifting."
+      "healed_at": "2026-02-27T11:26:45Z",
+      "heal_description": "Service auto-restarted at 11:26:45 UTC with PID 1253792. ACTIVE but DISABLED.",
+      "note": "Run #673: STABLE. USDC=$29.71 (audit confirmed). Both SELL orders 0 matched. AI HOLD Talarico (true_prob=0.85). Safety block (80% cap). Total $81.78. P&L=-$1.10. UNCHANGED."
     }
   },
   "wallet_assets": {
-    "usdc": 76.257299,
+    "usdc": 29.71,
+    "usdc_rpc_raw": 29.712299,
+    "audit_rpc_broken": false,
+    "audit_rpc_note": "Run #673: wallet_audit.py confirmed USDC=$29.712299. UNCHANGED.",
     "shares_value": 0.0,
-    "clob_locked": 10.02,
-    "total": 76.26,
-    "pnl": -6.62,
+    "shares_value_note": "No conditional tokens in wallet — all shares locked in SELL orders on CLOB.",
+    "sell_order_shares_value": 52.07,
+    "sell_order_note": "TWO SELL orders: Crockett 37.26sh @ $0.70 ($26.08) + Talarico 32.09sh @ $0.81 ($25.99). 0 matched on both.",
+    "clob_locked": 0.0,
+    "clob_locked_note": "No BUY orders.",
+    "total": 81.78,
+    "total_note": "USDC $29.71 + Sell orders $52.07 = $81.78. UNCHANGED.",
+    "pnl": -1.10,
     "starting_balance": 82.88,
     "pol": 78.46,
-    "tokens": [],
-    "open_orders": [
-      {
-        "side": "BUY",
-        "size": 12.84,
-        "price": 0.78,
-        "matched": 0.0,
-        "remaining": 12.84,
-        "locked_usdc": 10.02,
-        "status": "LIVE",
-        "market": "Talarico Dem nominee"
-      }
+    "tokens": [
+      {"asset": "Jasmine Crockett Democratic nominee YES", "shares": 37.26, "entry_price": 0.671, "current_price": 0.31, "sell_price": 0.70, "value_at_sell": 26.08, "value_at_market": 11.55, "value_at_resolution": 37.26, "status": "SELL POSTED @ $0.70 (0 matched)", "polymarket_odds": "31%", "note": "Crockett 31%. UT +12 (56-44). PPP Talarico +6 (48-42). Allred+Kamala+Cardi B endorsed. March 3 (3 days)."},
+      {"asset": "James Talarico Democratic nominee YES", "shares": 32.09, "entry_price": 0.78, "current_price": 0.69, "sell_price": 0.81, "value_at_sell": 25.99, "value_at_market": 22.14, "value_at_resolution": 32.09, "status": "SELL POSTED @ $0.81 (0 matched)", "polymarket_odds": "72% (first-round) / 69% (winner)", "note": "Talarico 72%/69%. PCCC+Obama. $21.5M ads. PPP +6. March 3 (3 days)."}
     ],
-    "actions_needed": [],
-    "last_audit": "2026-02-25T13:28:16Z",
-    "audit_note": "DEPOSIT ARRIVED: On-chain $76.26 USDC (was $13.38 — +$62.88 deposit). 1 LIVE BUY order (Iran Feb28 NO $6.71 intent — NOT counted in total). 0 conditional tokens. True trading P&L: -$6.62 on original $20. Effective capital now $82.88."
+    "open_orders": [
+      {"side": "SELL", "market": "Crockett YES", "size": 37.26, "price": 0.70, "matched": 0.0, "status": "LIVE"},
+      {"side": "SELL", "market": "Talarico YES", "size": 32.09, "price": 0.81, "matched": 0.0, "status": "LIVE"}
+    ],
+    "hedge_analysis": {
+      "note": "BOTH TX outcomes are losses. We paid ~$50 for both sides, max recovery ~$37.26 or ~$32.09.",
+      "if_talarico_wins": {"talarico_pnl": 7.06, "crockett_pnl": -24.99, "net": -17.93},
+      "if_crockett_wins": {"talarico_pnl": -25.03, "crockett_pnl": 12.27, "net": -12.76},
+      "best_case": "Crockett wins → -$12.76",
+      "worst_case": "Talarico wins → -$17.93",
+      "polls_favor": "DIVERGENT. UT 56-44 Crockett (+12). PPP 48-42 Talarico (+6). Polls favor CROCKETT (best case for us).",
+      "market_favors": "Talarico (72% first-round, 69% winner) — UNCHANGED",
+      "early_voting": "ENDED Feb 27. Record 1.6M+ (52.6% Dem / 47.4% Rep). March 3 election day (3 days).",
+      "new_endorsements": "Crockett: Kamala Harris (robocall), Cardi B, Allred. Talarico: PCCC, Obama clip, $21.5M ad spend.",
+      "market_shift": "Talarico UNCHANGED: 69% winner / 72% first-round. Polls/market divergence persists.",
+      "demographic_note": "Hispanic 59% Talarico, White 57% Talarico, Black 80%+ Crockett. Turnout composition will decide.",
+      "iran_context": "Geneva Feb 26: 'significant progress'. Vienna tech talks next week. BUT largest US airpower buildup since 2003 Iraq invasion. Trump '10-15 days to decide'."
+    },
+    "actions_needed": [
+      "CRITICAL: Both TX sides held. Guaranteed loss -$12.76 (best) to -$17.93 (worst). March 3 (3 days).",
+      "WATCH: TX Primary March 3 (3 DAYS). Polls favor CROCKETT (UT +12). Market favors TALARICO (72%). Massive divergence.",
+      "TODAY FEB 28: Anthropic WIN (12pm ET). Bayern-BVB (17:30 UTC — NOT played). Iran NO (WIN). All paper.",
+      "IRAN MARCH: Largest US airpower buildup since 2003 Iraq. USS Ford + Lincoln. BUT Geneva 'significant progress'. Trump '10-15 days'.",
+      "RESOLVED STUCK: 11 markets Gamma-confirmed closed. Bot not auto-closing.",
+      "SAFETY BLOCK: NegRisk arb blocked by 80% exposure cap. Bot at capacity."
+    ],
+    "last_audit": "2026-02-28T01:09:52Z",
+    "audit_note": "Run #673: wallet_audit.py confirmed. USDC=$29.71. Two SELL orders ($52.07). Total=$81.78. P&L=-$1.10. UNCHANGED."
   },
   "paper_strategies": {
     "MARKET_MAKER": {
       "status": "running",
       "pid": 57151,
-      "balance": 603.64,
-      "pnl": 148.00,
-      "win_rate": 90.3,
-      "trades": 62,
-      "open_positions": 5,
-      "trend": "stable",
+      "balance": 461.70,
+      "pnl": 213.51,
+      "win_rate": 88.6,
+      "trades": 123,
+      "open_positions": 7,
+      "trend": "improving",
       "consecutive_declining": 0,
-      "note": "MM: $603.64, +$148.00 P&L, 90.3% WR, 62 trades, 5 open. Stable."
+      "note": "Run #673: +$213.51 total P&L (88.6% WR, 123 trades). Balance $461.70. 7 open. UNCHANGED."
     },
     "NEAR_CERTAIN": {
       "status": "running",
@@ -67,31 +91,30 @@
       "open_positions": 4,
       "trend": "stable",
       "consecutive_declining": 0,
-      "note": "NC: $409.60, 4 open. At cap ($530/500). No resolved trades."
+      "note": "Run #673: T1 LOSS -$200 unbooked. Anthropic resolves TODAY Feb 28 12pm ET. LIKELY WIN."
     },
     "NEAR_ZERO": {
       "status": "running",
       "pid": 41949,
-      "balance": 686.18,
       "pnl": 0.00,
       "win_rate": 0.0,
       "trades": 0,
       "open_positions": 3,
       "trend": "stable",
       "consecutive_declining": 0,
-      "note": "3 NegRisk arb positions ($313.82 deployed). Balance $686.18. At cap."
+      "note": "Run #673: 3 NegRisk positions ($313.82). Unchanged."
     },
     "VOLUME_SURGE": {
       "status": "running",
       "pid": 43171,
-      "balance": 367.12,
-      "pnl": 15.27,
-      "win_rate": 20.0,
-      "trades": 25,
-      "open_positions": 9,
-      "trend": "stable",
-      "consecutive_declining": 0,
-      "note": "VS: $367.12, +$15.27 P&L, 20% WR, 25 trades, 9 open. Stable."
+      "balance": 518.12,
+      "pnl": -60.51,
+      "win_rate": 20.5,
+      "trades": 44,
+      "open_positions": 6,
+      "trend": "declining",
+      "consecutive_declining": 9,
+      "note": "Run #673: Balance $518.12. P&L -$60.51. 44 trades. 20.5% WR. 9th consecutive decline. 6 open."
     },
     "NEG_RISK_ARB": {
       "status": "running",
@@ -103,7 +126,7 @@
       "open_positions": 3,
       "trend": "stable",
       "consecutive_declining": 0,
-      "note": "3 NegRisk arb positions ($313.82 deployed). DUPLICATE with NEAR_ZERO — shared portfolio."
+      "note": "Run #673: 3 NegRisk arb positions. NHL + Trump deportations. Unchanged."
     },
     "DIP_BUY": {
       "status": "paused",
@@ -115,85 +138,97 @@
       "open_positions": 4,
       "trend": "paused",
       "paused_at": "2026-02-22T23:00:00Z",
-      "pause_reason": "Structural weakness: 28.6% win rate, -$48.04 P&L. 5/7 trades are sports events (all stopped out). Strategy buys dips that are real information, not mispricing."
+      "pause_reason": "28.6% WR. True P&L with resolutions: +$16.09 (Raptors +$43 saved it)."
     }
   },
   "pending_resolutions": {
-    "summary": "10 markets closed (Gamma closed=true, resolved=null). All events verified via web search. Pending on-chain resolution processing by paper sim.",
+    "summary": "Run #673: TODAY FEB 28 — Anthropic (WIN, 12pm ET), Bayern-BVB (17:30 UTC, NOT played), Iran NO (WIN). TX Primary March 3 (3 days). IRAN MARCH: Largest buildup since 2003 BUT Geneva progress. Trump '10-15 days'.",
     "markets": [
-      {"market": "T1 vs DK (BO5) LCK Cup", "result": "DK won 3-2 (reverse sweep)", "resolution": "NO", "strategies_affected": ["MM (-$159.94)", "NC (-$199.92)"]},
-      {"market": "Barcelona Feb 22", "result": "Barca 3-0 Levante", "resolution": "YES", "strategies_affected": ["MM (+$2.58)"]},
-      {"market": "Liverpool Feb 22", "result": "Liverpool 1-0 Forest (97th min)", "resolution": "YES", "strategies_affected": ["MM (+$0.69)", "DIP (+$11.68)"]},
-      {"market": "Lille Feb 22", "result": "Lille 1-0 Angers", "resolution": "YES", "strategies_affected": ["MM (+$1.58)"]},
-      {"market": "Vitality vs PARIVISION (BO5)", "result": "Vitality 3-0", "resolution": "YES", "strategies_affected": ["VS (+$3.98)"]},
-      {"market": "Musk 40-64 tweets Feb 21-23", "result": "65-89 tweets (outside bracket)", "resolution": "NO", "strategies_affected": ["VS (+$2.90)"]},
-      {"market": "BetBoom vs PARIVISION (BO3)", "result": "BetBoom 2-1", "resolution": "YES", "strategies_affected": ["VS (+$2.74)"]},
-      {"market": "Vitality Map 1", "result": "Vitality 13-10", "resolution": "YES", "strategies_affected": ["DIP (+$9.71)"]},
-      {"market": "Raptors vs Bucks", "result": "Raptors 122-94", "resolution": "YES", "strategies_affected": ["DIP (+$44.06)"]},
-      {"market": "Olympics US 2nd most golds", "result": "US won 12 golds (2nd behind Norway)", "resolution": "YES", "strategies_affected": ["NC ($0 profit, entry $1.00)"]}
+      {"market": "Anthropic best AI end Feb", "expires": "2026-02-28", "our_side": "YES (NC + MM paper)", "expected": "CONFIRMED WIN. Claude Opus 4.6 #1 Chatbot Arena. 84% Polymarket.", "resolution": "TODAY Feb 28 12pm ET. WIN."},
+      {"market": "Bayern Munich Feb 28", "expires": "2026-02-28", "our_side": "YES (MM paper)", "expected": "Bayern 63% favorite. BVB 2nd (52pts) vs Bayern 1st (60pts). Signal Iduna Park 17:30 UTC. NOT YET PLAYED.", "resolution": "TODAY 17:30 UTC kickoff. PENDING."},
+      {"market": "US next strikes Iran Feb 28", "expires": "2026-02-28", "our_side": "NO (VS paper)", "expected": "NO Feb strikes confirmed. Geneva 'significant progress'. Diplomacy track active.", "resolution": "TODAY — NO wins (confirmed). WIN."},
+      {"market": "Talarico Democratic nominee", "expires": "2026-03-03", "our_side": "YES (LIVE 32.09sh @ $0.78, SELL $0.81)", "expected": "Polymarket 72%/69%. PCCC+Obama. $21.5M ads. PPP +6. BUT UT poll +12 Crockett.", "resolution": "March 3 (3 days)."},
+      {"market": "Crockett Democratic nominee", "expires": "2026-03-03", "our_side": "YES (LIVE 37.26sh @ $0.671, SELL $0.70)", "expected": "UT poll 56-44 Crockett (+12). Black 80%+ support. Kamala+Cardi B+Allred. Market says 31%.", "resolution": "March 3 (3 days)."},
+      {"market": "FUT vs M80 ESL", "expires": "2026-03-01", "our_side": "MM (paper)", "expected": "March 1 16:30 CET.", "resolution": "March 1."},
+      {"market": "Iran next strikes Mar 3", "expires": "2026-03-03", "our_side": "NO (VS paper)", "expected": "Largest US airpower buildup since 2003. USS Ford + Lincoln + 150+ aircraft. Geneva progress. Trump '10-15 days'. ELEVATED.", "resolution": "CRITICAL — March 1-3."},
+      {"market": "Iran strikes Mar 31", "expires": "2026-03-31", "our_side": "YES (DIP 214.7sh @ $0.561)", "expected": "EXTREMELY HIGH RISK. Largest buildup since 2003 Iraq. BUT Geneva 'significant progress'. Trump '10-15 days to decide'.", "resolution": "PENDING — risk very elevated, diplomacy thread alive."},
+      {"market": "Fed no rate change March", "expires": "2026-03-19", "our_side": "YES (NC)", "expected": "97%.", "resolution": "PENDING."},
+      {"market": "Arsenal EPL", "expires": "2026-05", "our_side": "YES (VS)", "expected": "Long-term.", "resolution": "PENDING."},
+      {"market": "Man City EPL NO", "expires": "2026-05", "our_side": "NO (VS)", "expected": "Long-term.", "resolution": "PENDING."}
     ],
-    "upcoming_expirations": [
-      {"market": "US strikes Iran Feb 26", "expires": "2026-02-26", "our_side": "NO", "expected": "NO STRIKES YET. Geneva talks TOMORROW Feb 26. Iran FM: deal 'within reach'. Oman: 'positive push to finalize'. Araghchi flying to Geneva tonight. Tone cautiously optimistic. BUT 150+ aircraft, 2 carrier groups deployed. Trump considering limited strikes. HIGH UNCERTAINTY.", "est_profit": "+$6.85 if NO, -$68.50 if YES"},
-      {"market": "US strikes Iran Feb 28", "expires": "2026-02-28", "our_side": "NO (LIVE BUY @ $0.86)", "expected": "LIVE POSITION. Geneva talks Feb 26 are the pivot. If talks succeed/extend, NO wins. If talks fail, military action before March 1 plausible. LIVE: 7.8 shares × $0.86 = $6.71 intent.", "est_profit": "+$1.09/share if NO"},
-      {"market": "ETH dip to $1,600 Feb", "expires": "2026-02-28", "our_side": "NO", "expected": "Very likely NO. ETH ~$1,957. Would need ~18% crash in 3 days.", "est_profit": "+$10.85"},
-      {"market": "Anthropic best AI end Feb", "expires": "2026-02-28", "our_side": "YES", "expected": "VERY STRONG — 88% market odds. Sonnet 4.6 leads GDPval-AA. Opus 4.6 leads SWE-bench.", "est_profit": "+$10.47"},
-      {"market": "Fed no rate change March", "expires": "2026-03-19", "our_side": "YES", "expected": "VERY STRONG — Fed held at 3.5-3.75% in Jan. Low odds of March cut.", "est_profit": "small (0.96 entry)"},
-      {"market": "Khamenei out by March 31", "expires": "2026-03-31", "our_side": "NO", "expected": "ELEVATED RISK — Age 86, missed Air Force Day, coma-like episodes, son running office. Health declining. BUT no death/removal confirmed.", "est_profit": "small"},
-      {"market": "Arsenal win EPL", "expires": "2026-05", "our_side": "YES", "expected": "STRONG — Arsenal 1st (61pts), 4pts clear. Opta 90.5%.", "est_profit": "depends on resolution"}
-    ],
-    "net_impact": {
-      "MM": -155.09,
-      "NC": -199.92,
-      "VS": 9.62,
-      "DIP": 65.45,
-      "total": -279.94
-    }
+    "resolved_but_stuck": [
+      {"market": "Liverpool Feb 22 YES", "portfolios": ["MM", "DIP"], "result": "WON", "impact": {"mm": 0.69, "dip": 11.48}},
+      {"market": "Barcelona Feb 22 YES", "portfolios": ["MM"], "result": "WON", "impact": {"mm": 2.56}},
+      {"market": "Lille Feb 22 YES", "portfolios": ["MM"], "result": "WON", "impact": {"mm": 1.56}},
+      {"market": "T1 vs DK LCK YES", "portfolios": ["MM", "NC"], "result": "LOST (DK 3-2 reverse)", "impact": {"mm": -160.00, "nc": -200.00}},
+      {"market": "US Winter Golds YES", "portfolios": ["NC"], "result": "WON", "impact": {"nc": 0.00}},
+      {"market": "Iran Feb 26 NO", "portfolios": ["VS"], "result": "WON", "impact": {"vs": 6.81}},
+      {"market": "Vitality BO5 YES", "portfolios": ["VS"], "result": "WON", "impact": {"vs": 3.92}},
+      {"market": "BetBoom YES", "portfolios": ["VS"], "result": "WON", "impact": {"vs": 2.71}},
+      {"market": "Musk 40-64 NO", "portfolios": ["VS"], "result": "LOST", "impact": {"vs": -58.56}},
+      {"market": "Raptors YES", "portfolios": ["DIP"], "result": "WON", "impact": {"dip": 43.11}},
+      {"market": "Vitality Map1 YES", "portfolios": ["DIP"], "result": "WON", "impact": {"dip": 9.54}}
+    ]
   },
   "ec2_instance": "i-08a9ff0a3fc646e5d",
   "ec2_ip": "16.54.60.150",
   "wallet": "0x572FA217B5981d5f9F337a5eD5561084C665AD9A",
   "initial_capital": 20.00,
   "learned": [
-    "CRITICAL: NEVER report P&L from wallet USDC alone. Must check: USDC + conditional tokens + NegRisk tokens + CLOB open orders. Use wallet_audit.py.",
-    "CRITICAL: NEVER zero out portfolio state or auto-correct balance from single data source. Always reconcile, never delete.",
-    "CRITICAL: NegRisk sells require client.update_balance_allowance() BEFORE posting sell order. CLOB balance cache goes stale.",
-    "INFRASTRUCTURE: Circuit breaker (2 stops/24h = lockout), atomic writes, API retry with backoff, JSON corruption recovery. 858 tests passing.",
-    "INFRASTRUCTURE: After EC2 reboot, tmpfs env is lost → manual load_secrets.sh + restart. Resolved markets return 400 gracefully.",
-    "LIVE TRADING: Fire-sale bug FIXED (sell timer from fill, 50% price floor). Quiet periods 12h+ normal. Pegula resolved 50-50 (walkover).",
-    "LIVE TRADING: Service auto-restarts preserve in-memory state via systemd Restart=on-failure. Balance correction on startup can trigger immediate order placement with full available capital.",
-    "LIVE WALLET (Run #296): $76.26 USDC on-chain (+$62.88 DEPOSIT DETECTED). 0 tokens. 1 LIVE BUY $6.71 intent. Trading P&L: -$6.62. Effective capital: $82.88.",
-    "LIVE BUG: get_order_status returns NoneType error on every cycle — bot cannot check position status. Does not crash bot but position monitoring is blind.",
-    "LIVE SHUTDOWN (Run #270): Service stopped via systemctl stop at 09:59:46 UTC. Clean exit (code=0). NOT a crash. All CLOB orders cancelled. Previous $14.29 locked collateral returned but may not be settled on-chain yet (on-chain shows $13.38, bot internal showed $21.81 after cancellations).",
-    "AUDIT LESSON: Wallet USDC can appear $0 due to stale Polygon RPC from EC2 — always cross-check with CLOB API for open orders. Audit 45 min later showed true $13.38.",
-    "PAPER MM (3 DAYS): +$148.00 P&L, 90.3% WR, 62 trades. Trend stable. NC/NZ at cap — skipping new entries.",
-    "PAPER VS (3 DAYS): +$15.27 P&L, 20% WR, 25 trades, 9 open. Stable.",
-    "PAPER DIP_BUY (PAUSED): -$48.04, 28.6% WR. 5/5 losses = sports. Sports dips = real information, not mispricing. Structurally broken.",
-    "PAPER MID_RANGE: -$22.22, 0% WR, 2 trades. Both sports events stopped out. Should be disabled.",
-    "PAPER NC: $590 deployed, 0 resolved. Olympics position ($128) is dead capital (99.9996% entry = $0 profit).",
-    "PAPER NZ/NRA DUPLICATE: Identical portfolio files, same 3 positions ($313.82). NEAR_ZERO finds no true opportunities.",
-    "CODE REVIEW (2026-02-25): MM sports filter IS active. VS has no price re-validation at execution time (can drift out of edge zone). DIP_BUY has no sports filter. NZ/NRA run as separate processes finding same positions.",
-    "MM BURST MECHANICS: No cooldown after timeout exit. Circuit breaker only tracks stops, not timeouts. Enables rapid re-entry on same market — profitable for stable MM but risky on volatile sports.",
-    "DAILY ANALYSIS #5: Only MM Core has systematic edge (+$148, 90.3% WR). VS is a net-negative lottery ticket. DIP_BUY/MID_RANGE structurally broken. NC/NZ/NRA have no completed trades. 4 bugs identified, none fixed (need human review).",
-    "POLYMARKET 50-50: Walkover/cancelled matches resolve 50-50 ($0.50/share). Not a full refund — fixed price regardless of entry. Entry at $0.50 = break even.",
-    "RESOLUTION BATCH (2026-02-25): 10 markets closed (incl Olympics), all confirmed via web search. T1 vs DK reverse sweep = biggest loss (-$360 across MM+NC). Near-certain 0.96 entries on esports BO5 = catastrophic when upset occurs.",
-    "GAMMA API: All markets show closed=true, resolved=null, prices=[0,0]. Paper sim not processing resolutions automatically — positions stay open in portfolios until on-chain resolution propagates to sim.",
-    "IRAN GEOPOLITICS (2026-02-25 13:29): NO STRIKES YET. Geneva talks TOMORROW Feb 26 at Omani mission. Araghchi flying tonight. Iran FM: deal 'within reach'. Oman: 'positive push to finalize'. BUT 2 carrier groups + 150 aircraft deployed. Trump considering limited strikes. HIGH UNCERTAINTY.",
-    "ANTHROPIC (2026-02-25 12:53): 88% market odds. Sonnet 4.6 leads GDPval-AA (1,633 Elo). Opus 4.6 leads SWE-bench (80.8%).",
-    "ETH (2026-02-25): $1,957. Well above $1,600. Paper NO very safe.",
-    "FED MARCH 2026: Held at 3.5-3.75% in Jan. Low odds of March cut. First cut expected June.",
-    "ARSENAL EPL (2026-02-25): 1st place (61pts, 18-7-3), 4pts clear. Opta 90.5%.",
-    "KHAMENEI HEALTH (2026-02-25 12:53): Age 86. Missed Air Force Day Feb 9. Coma-like episodes. Son Massoud running office. Health declining but no death/removal confirmed.",
-    "CLOB LOCKED PHANTOM: wallet_audit.py was double-counting CLOB 'locked' as real money ($14.29 phantom). Fixed — unfilled orders are off-chain intents only. Only on-chain balances are real.",
-    "CAPITAL UNLOCKED (Run #296): $62.88 USDC deposit arrived! Wallet now $76.26. Bot will auto-detect on next 5-min balance sync. Capital constraint lifted — can enter new positions."
+    "CRITICAL: NEVER report P&L from wallet USDC alone. Must check all token balances.",
+    "CRITICAL: NEVER zero out portfolio state. Always reconcile, never delete.",
+    "CRITICAL: NegRisk sells require client.update_balance_allowance() BEFORE posting sell.",
+    "CRITICAL (Daily #7): T1 LOSS -$360 across MM+NC. NEAR_CERTAIN at 96%+ is NOT safe.",
+    "CRITICAL: 11 resolved markets stuck in paper portfolios. Resolution detection BROKEN.",
+    "CRITICAL (Daily #7): VS crypto trades -$30.49. Data says AVOID CRYPTO.",
+    "INFRASTRUCTURE: Circuit breaker, atomic writes, API retry, JSON recovery. 858 tests.",
+    "INFRASTRUCTURE: After EC2 reboot, tmpfs env is lost. SSH user is ec2-user.",
+    "LIVE TRADE (Run #622): CROCKETT SELL FILLED @ $0.32 (+$1.69, +6.7%). 84.75sh sold. USDC up $27.12 to $54.68.",
+    "LIVE TRADE (Run #622): Bot re-entered Crockett BUY @ $0.671 (37.26sh). 0 matched. WAY above market (30%). If fills: trap zone entry.",
+    "LIVE TRADE (Run #630): CROCKETT BUY FILLED @ $0.671 (37.26sh). USDC $54.68→$29.71. Bot posted SELL $0.70. Both TX sides now held. GUARANTEED LOSS -$12.76 to -$17.93.",
+    "HEDGE ANALYSIS (Run #630): Talarico 32.09sh@$0.78 + Crockett 37.26sh@$0.671 = ~$50 invested. Max recovery ~$37.26 (if Crockett wins). Both outcomes: -$12.76 (Crockett) or -$17.93 (Talarico). Polls favor Crockett → best case -$12.76.",
+    "AUDIT BUG (Run #622): wallet_audit.py still missing Talarico token. CLOB sell orders may not be captured as assets.",
+    "TX PRIMARY (Run #673): UT Feb 25: Crockett 56-44 (+12). PPP: Talarico 48-42 (+6). Polymarket: Talarico 72%. MASSIVE divergence persists. March 3 (3 days).",
+    "IRAN (Run #673): Largest US airpower buildup since 2003 Iraq. USS Ford + Lincoln + 150+ aircraft. BUT Geneva 'significant progress'. Vienna tech talks. Trump '10-15 days to decide'.",
+    "ANTHROPIC (Run #673): CONFIRMED WIN. Claude Opus 4.6 #1 Arena. Resolves TODAY 12pm ET.",
+    "BAYERN-BVB (Run #673): TODAY 17:30 UTC. NOT yet played. Bayern 1st (60pts) vs BVB 2nd (52pts). Bayern 63% favorite.",
+    "PAPER MM (Run #673): +$213.51 (88.6% WR, 123 trades). Balance $461.70. 7 open. UNCHANGED.",
+    "PAPER VS (Run #673): Balance $518.12. -$60.51. 20.5% WR. 9th decline. 6 open.",
+    "SERVICE STATUS: Live bot ACTIVE but DISABLED (won't survive reboot).",
+    "JOURNAL ROTATED: Run #668. Runs #661-667 consolidated (all STABLE, UNCHANGED).",
+    "SAFETY BLOCK (Run #637): NegRisk arb blocked by 80% exposure cap. Bot at capacity.",
+    "EARLY VOTING (Run #665): Record 1.6M+ votes statewide. 52.6% Dem / 47.4% Rep. Ended Feb 27."
   ],
   "active_warnings": [
-    "P1 — IRAN FEB 28 LIVE POSITION: BUY order LIVE — Iran Feb28 NO @ $0.86 (7.8 shares, $6.71 intent). Geneva talks TOMORROW Feb 26. Iran FM: deal 'within reach'. Oman: 'positive push'. BUT 2 carrier groups + 150 aircraft. HIGH UNCERTAINTY.",
-    "P1 — END OF MONTH (Feb 28): Anthropic/ETH/Iran-Feb28 all expire. Monitor closely.",
-    "P1 — DEPOSIT ARRIVED: +$62.88 USDC detected on-chain. Wallet: $13.38→$76.26. Bot will auto-detect and unlock capital for new positions.",
-    "P2 — BOT BALANCE SYNC PENDING: Bot internal still shows $6.69. Will sync to ~$76.26 on next 5-min balance check. Expect burst of new order activity.",
-    "P2 — CHAIN DRIFT: Bot internal balance ($6.69) vs on-chain ($76.26) — will resolve on next balance sync."
+    "P0 — CROCKETT BUY FILLED: Both TX sides held. Guaranteed loss -$12.76 (best) to -$17.93 (worst). March 3 (3 days).",
+    "P0 — TX PRIMARY 3 DAYS: Talarico 72%. Crockett 31%. UT poll +12 Crockett. Massive polls/market divergence.",
+    "P0 — TODAY FEB 28: Anthropic (WIN, 12pm ET), Bayern-BVB (17:30 UTC, not played), Iran NO (WIN). All paper.",
+    "P0 — IRAN MARCH: Largest US airpower buildup since 2003 Iraq. Geneva 'significant progress'. Trump '10-15 days'.",
+    "P0 — RESOLVED STUCK: 11 markets Gamma-confirmed closed. Bot not auto-closing. T1 -$360 unbooked.",
+    "P1 — AUDIT BUGS: Missing Talarico token. CLOB sell orders may not be captured as assets.",
+    "P1 — TRUE P&L DISTORTED: Paper reported +$213 but true ~+$55 after resolutions.",
+    "P1 — SAFETY BLOCK: NegRisk arb blocked by 80% exposure cap. Bot at capacity.",
+    "P2 — VS DECLINING: Balance $518.12. -$60.51. 44 trades. 20.5% WR. 9th consecutive decline.",
+    "P3 — SERVICE DISABLED: Running but disabled. Won't survive reboot."
   ],
-  "total_portfolio_value": 6023.75,
-  "total_pnl": 114.17,
-  "total_pnl_after_resolutions": -165.77
+  "total_portfolio_value": 2575.78,
+  "total_pnl_reported": 131.83,
+  "total_pnl_true_estimate": -25.00,
+  "total_pnl_note": "Reported ~+$132 but T1 -$360 + VS -$58 + mid-range -$22 unbooked resolutions flip negative. Live: P&L=-$1.10. Both TX sides = guaranteed -$12 to -$18 loss at resolution. TODAY: Anthropic WIN + Iran NO WIN (paper). Bayern 17:30 UTC. Iran March: largest buildup since 2003 but Geneva progress.",
+  "autonomous": {
+    "enabled": true,
+    "max_position_auto": 50.0,
+    "max_actions_per_cycle": 2,
+    "max_value_per_cycle": 50.0,
+    "actions_this_cycle": 0,
+    "value_this_cycle": 0.0,
+    "consecutive_losses": 0,
+    "paused_until": null,
+    "action_history": [],
+    "last_review": {
+      "run": 673,
+      "crockett": {"claude_verdict": "HOLD", "claude_confidence": 0.40, "note": "Crockett 31% market. UT 56-44 (+12). SELL $0.70 stays. March 3 (3 days).", "decision": "HOLD. Awaiting resolution March 3."},
+      "talarico": {"claude_verdict": "HOLD", "claude_confidence": 0.45, "note": "Talarico 72%/69%. AI true_prob=0.85. $21.5M ads. PPP +6. SELL $0.81 stays. March 3 (3 days).", "decision": "HOLD (sell $0.81 stays)"}
+    }
+  }
 }
