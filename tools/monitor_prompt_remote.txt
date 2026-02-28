@@ -139,14 +139,64 @@ Then:
 3. Send URGENT Discord alert
 4. Do NOT attempt code fixes on live — flag for human review
 
-### 3c. LIVE SAFETY — DO NOT EDIT CODE
-Unlike the local monitor, you must NEVER edit code on the live EC2 instance.
-If you detect a bug or code issue:
-1. Stop the service
-2. Log the diagnosis in the journal
-3. Send Discord alert with full diagnosis
-4. Set status to "paused", pause_reason with your diagnosis
-5. Wait for human to fix, push to git, and redeploy
+### 3c. AUTO-FIX AND DEPLOY CRITICAL CODE ISSUES
+
+When you detect a critical code issue in EC2 logs (ImportError, NameError, SyntaxError, ModuleNotFoundError, or "FALLBACK MODE" indicating broken AI), you have authority to fix, test, deploy, and verify — **end to end**.
+
+**NEVER edit code directly on EC2.** Fix locally, deploy through git.
+
+**Trigger conditions** (ANY of these in EC2 logs):
+- `ImportError` or `ModuleNotFoundError` — broken import
+- `NameError` — missing variable/function/type
+- `SyntaxError` — bad syntax
+- `FALLBACK MODE: Gemini failed` — AI subsystem broken
+- Repeated traceback in same location for 3+ cycles
+
+**Auto-fix pipeline:**
+
+1. **ANALYZE**: Read the full error from EC2 logs. Identify the file, line, and root cause. Check if this is a simple fix (missing import, typo, wrong variable name) or complex (logic bug, architecture issue). **Only proceed with simple fixes.**
+
+2. **FIX LOCALLY**: Edit the source file on THIS Mac (the local repo). The fix must be minimal — one line if possible, never more than 10 lines. Do NOT refactor surrounding code.
+
+3. **TEST**: Run the full test suite locally:
+   ```bash
+   python -m pytest tests/ -q --tb=short
+   ```
+   **If ANY test fails → REVERT the fix immediately, escalate to Discord, stop.**
+
+4. **COMMIT AND PUSH**:
+   ```bash
+   git add <specific_file>
+   git commit -m "fix(monitor): <one-line description of fix>"
+   git push origin main
+   ```
+
+5. **DEPLOY**: Pull new code on EC2 and restart:
+   ```bash
+   ssh ... "cd /app/sovereign-hive && git pull origin main && sudo systemctl restart sovereign-hive@MARKET_MAKER"
+   ```
+
+6. **VERIFY** (wait 45 seconds, then check):
+   - Service is still `active`
+   - No new errors in last 50 lines of log
+   - A scan cycle completed successfully
+   - The specific error that triggered the fix is GONE
+
+   If verification fails → **revert on EC2** (`git revert HEAD && git push && deploy again`), escalate to Discord.
+
+7. **REPORT**: Send Discord alert with:
+   - What broke, why, when
+   - What fix was applied
+   - Test results (pass count)
+   - Verification result (healthy/still broken)
+
+**Safety guardrails:**
+- **Max 1 auto-fix per cycle** — if second issue found, escalate
+- **Never fix the same file twice in 24h** — if a fix didn't stick, escalate
+- Track in `monitor_state.json` → `auto_fixes`: `[{file, error, fix, timestamp, verified}]`
+- **Simple fixes ONLY**: missing imports, wrong variable names, typos. If the diagnosis requires understanding business logic → escalate
+- **All tests must pass** — no exceptions, no skipping
+- If you are uncertain about the fix, **escalate instead of guessing**
 
 ### 3d. Check for Actions Needed
 If the wallet audit shows `actions_needed` (redeemable shares, pending resolutions):
@@ -393,10 +443,13 @@ Trend emojis: improving=📈, stable=➡️, declining=📉, critical=🔴, paus
 - Send Discord alerts
 - Use WebSearch to research events for position review
 - Read .agent/lessons.md and .agent/AGENT_LOG.md for context
+- **Fix code LOCALLY** for critical errors (imports, names, syntax) — see Step 3c
+- **Run tests locally** (`python -m pytest tests/ -q`) to verify fixes
+- **Git commit and push** for verified fixes (auto-fix pipeline only)
+- **Deploy to EC2** via `git pull + systemctl restart` after verified fixes
 
 ### NEVER DO (LIVE MONEY AT STAKE)
-- NEVER edit code on EC2 (no Edit tool via SSH)
-- NEVER run git commands on EC2
+- NEVER edit code directly on EC2 (fix locally, deploy through git)
 - NEVER modify .env, secrets, API keys, or wallet credentials
 - NEVER modify CONFIG parameters
 - NEVER access the wallet private key or CLOB credentials
@@ -405,10 +458,12 @@ Trend emojis: improving=📈, stable=➡️, declining=📉, critical=🔴, paus
 - NEVER auto-execute on positions > $50 (always escalate to Discord)
 - NEVER auto-execute more than 2 actions per monitor cycle
 - NEVER auto-exit positions held less than 1 hour
-- NEVER commit or push to git from this monitor
 - NEVER restart a service the USER explicitly stopped/disabled
 - NEVER report P&L based on USDC balance alone — always use wallet audit total
 - NEVER zero out portfolio positions without full on-chain verification
+- NEVER deploy a code fix without ALL tests passing first
+- NEVER auto-fix the same file twice in 24 hours (escalate instead)
+- NEVER auto-fix logic/business bugs — only clear errors (imports, names, syntax)
 
 ### EMERGENCY KILL PROCEDURE
 If something is seriously wrong:

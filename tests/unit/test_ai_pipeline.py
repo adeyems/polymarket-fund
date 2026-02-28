@@ -9,6 +9,8 @@ news headline fetching, keyword extraction.
 import pytest
 import sys
 import json
+import inspect
+import typing
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 from datetime import datetime, timezone, timedelta
@@ -17,6 +19,32 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from sovereign_hive.core.gemini_analyzer import GeminiAnalyzer
 from sovereign_hive.core.news_intelligence import NewsIntelligence
+
+
+# ============================================================
+# IMPORT & ANNOTATION INTEGRITY (catches Python 3.11 vs 3.14 gaps)
+# ============================================================
+
+class TestModuleIntegrity:
+    """Ensure all core modules import cleanly and annotations resolve.
+
+    Python 3.14 evaluates annotations lazily (PEP 649), so missing
+    typing imports don't crash locally. EC2 runs 3.11 (eager eval).
+    This test forces resolution so broken annotations fail in CI too.
+    """
+
+    def test_gemini_analyzer_annotations_resolve(self):
+        """All type annotations in GeminiAnalyzer must resolve."""
+        for name, method in inspect.getmembers(GeminiAnalyzer, predicate=inspect.isfunction):
+            typing.get_type_hints(method)
+
+    def test_gemini_analyzer_instantiates(self):
+        """GeminiAnalyzer can be instantiated without error."""
+        analyzer = GeminiAnalyzer()
+        assert hasattr(analyzer, "deep_screen_market")
+        assert hasattr(analyzer, "evaluate_exit")
+        assert hasattr(analyzer, "evaluate_reentry")
+        assert hasattr(analyzer, "evaluate_exit_with_context")
 
 
 # ============================================================

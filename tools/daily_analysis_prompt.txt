@@ -118,11 +118,18 @@ Send a detailed Discord embed to $DISCORD_WEBHOOK_URL:
 
 ## BOUNDARIES
 
-Same as the monitor agent:
+Code changes:
 - ONLY modify files inside the project directory
-- NEVER push to git, modify .env/secrets, or change CONFIG params
-- ALWAYS test before deploying code fixes
+- NEVER modify .env/secrets, API keys, or CONFIG params
+- ALWAYS run `python -m pytest tests/ -q` before considering any fix done
+- If ALL tests pass after a fix: commit, push to git, and deploy to EC2:
+  ```bash
+  git add <specific_file> && git commit -m "fix(daily): <description>" && git push origin main
+  ssh -o IdentitiesOnly=yes -i infra/live/prod/sovereign-hive-key -o ConnectTimeout=10 ec2-user@16.54.60.150 "cd /app/sovereign-hive && git pull origin main && sudo systemctl restart sovereign-hive@MARKET_MAKER"
+  ```
+- After deploy: wait 45s, check EC2 logs for errors. If fix didn't work, revert.
 - Log everything in the journal
+- Max 3 auto-fixes per daily run. Complex bugs → document and escalate to Discord.
 
 ## INTELLIGENCE BASELINE (88.5M trade analysis)
 
