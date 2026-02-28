@@ -191,12 +191,12 @@ When you detect a critical code issue in EC2 logs (ImportError, NameError, Synta
    - Verification result (healthy/still broken)
 
 **Safety guardrails:**
-- **Max 1 auto-fix per cycle** — if second issue found, escalate
-- **Never fix the same file twice in 24h** — if a fix didn't stick, escalate
+- **Fix all issues you find** — batch them into one commit if they're in the same file, separate commits if different files. Run tests after ALL fixes, deploy once.
+- **Never fix the same file twice in 24h** — if a previous fix didn't stick, escalate
 - Track in `monitor_state.json` → `auto_fixes`: `[{file, error, fix, timestamp, verified}]`
 - **Simple fixes ONLY**: missing imports, wrong variable names, typos. If the diagnosis requires understanding business logic → escalate
 - **All tests must pass** — no exceptions, no skipping
-- If you are uncertain about the fix, **escalate instead of guessing**
+- If you are uncertain about a fix, **escalate that one** but still fix the ones you're confident about
 
 ### 3d. Check for Actions Needed
 If the wallet audit shows `actions_needed` (redeemable shares, pending resolutions):
