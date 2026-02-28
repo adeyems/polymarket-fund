@@ -3532,12 +3532,23 @@ class TradingEngine:
 
             # === PHASE 2: AI DEEP SCREEN (Gemini + news, cached 1hr) ===
             # Fallback: if AI fails 3x consecutively, pass through with heuristic scoring
+            # Auto-retry every 20 cycles (~10 min) to escape fallback latch
             ai_screened_strategies = {"MARKET_MAKER", "MEAN_REVERSION"}
             if not hasattr(self, '_ai_consecutive_failures'):
                 self._ai_consecutive_failures = 0
+            if not hasattr(self, '_ai_fallback_cycles'):
+                self._ai_fallback_cycles = 0
             ai_fallback_mode = self._ai_consecutive_failures >= 3
             if ai_fallback_mode:
-                print(f"[AI] FALLBACK MODE: Gemini failed {self._ai_consecutive_failures}x, using heuristic-only screening")
+                self._ai_fallback_cycles += 1
+                if self._ai_fallback_cycles >= 20:
+                    # Retry Gemini after ~10 min in fallback
+                    self._ai_consecutive_failures = 0
+                    self._ai_fallback_cycles = 0
+                    ai_fallback_mode = False
+                    print("[AI] Retrying Gemini after fallback cooldown...")
+                else:
+                    print(f"[AI] FALLBACK MODE: Gemini failed {self._ai_consecutive_failures}x, retry in {20 - self._ai_fallback_cycles} cycles")
 
             screened = []
             ai_calls_this_cycle = 0

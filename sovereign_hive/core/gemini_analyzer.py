@@ -12,7 +12,7 @@ import aiohttp
 import os
 import json
 from datetime import datetime, timezone
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from dotenv import load_dotenv
 
 load_dotenv()
