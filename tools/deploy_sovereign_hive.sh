@@ -121,16 +121,18 @@ else
     fi
 
     # Check for import errors, tracebacks, or Gemini failures in recent logs
-    ERRORS=$($SSH_CMD "tail -100 /var/log/sovereign-hive/${STRATEGY}.log 2>/dev/null | grep -ciE 'ImportError|ModuleNotFoundError|NameError|SyntaxError|FALLBACK MODE|Traceback'" || echo "0")
-    if [ "$ERRORS" -gt 0 ]; then
+    ERRORS=$($SSH_CMD "tail -100 /var/log/sovereign-hive/${STRATEGY}.log 2>/dev/null | grep -ciE 'ImportError|ModuleNotFoundError|NameError|SyntaxError|FALLBACK MODE|Traceback'" 2>/dev/null | tail -1 || echo "0")
+    ERRORS=$(echo "$ERRORS" | tr -d '[:space:]')
+    if [ "${ERRORS:-0}" -gt 0 ] 2>/dev/null; then
         echo "HEALTH CHECK WARNING: Found $ERRORS error indicators in recent logs"
         $SSH_CMD "tail -100 /var/log/sovereign-hive/${STRATEGY}.log 2>/dev/null | grep -iE 'ImportError|ModuleNotFoundError|NameError|SyntaxError|FALLBACK MODE|Traceback'" || true
         HEALTH_OK=false
     fi
 
     # Check that a scan cycle completed
-    SCAN_OK=$($SSH_CMD "tail -50 /var/log/sovereign-hive/${STRATEGY}.log 2>/dev/null | grep -c 'CYCLE'" || echo "0")
-    if [ "$SCAN_OK" -eq 0 ]; then
+    SCAN_OK=$($SSH_CMD "tail -50 /var/log/sovereign-hive/${STRATEGY}.log 2>/dev/null | grep -c 'CYCLE'" 2>/dev/null | tail -1 || echo "0")
+    SCAN_OK=$(echo "$SCAN_OK" | tr -d '[:space:]')
+    if [ "${SCAN_OK:-0}" -eq 0 ] 2>/dev/null; then
         echo "HEALTH CHECK WARNING: No scan cycle completed in first 45s"
         HEALTH_OK=false
     fi
